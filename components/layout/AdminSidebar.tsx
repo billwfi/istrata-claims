@@ -1,6 +1,7 @@
 "use client"
 
 import Link from "next/link"
+import Image from "next/image"
 import { usePathname } from "next/navigation"
 import { signOut } from "next-auth/react"
 import { cn } from "@/lib/utils"
@@ -15,7 +16,6 @@ import {
   FileSearch,
   LogOut,
   LayoutDashboard,
-  ClipboardList,
 } from "lucide-react"
 
 const navItems = [
@@ -34,13 +34,12 @@ export function AdminSidebar() {
   const pathname = usePathname()
 
   return (
-    <div className="w-56 min-h-screen bg-gray-900 text-gray-100 flex flex-col">
-      <div className="p-4 border-b border-gray-700">
-        <Link href="/locations" className="flex items-center gap-2 text-white font-semibold">
-          <ClipboardList className="h-5 w-5 text-blue-400" />
-          iStrata Claims
+    <div className="w-60 min-h-screen flex flex-col" style={{ backgroundColor: "#1D5570" }}>
+      <div className="px-4 py-5 border-b" style={{ borderColor: "#255f7a" }}>
+        <Link href="/locations">
+          <Image src="/logo.svg" alt="iStrata Management" width={180} height={52} priority />
         </Link>
-        <p className="text-xs text-gray-400 mt-0.5">Admin Panel</p>
+        <p className="text-xs mt-2 font-medium tracking-wide" style={{ color: "#6BA8BE" }}>Admin Panel</p>
       </div>
 
       <nav className="flex-1 p-3 space-y-0.5">
@@ -55,9 +54,10 @@ export function AdminSidebar() {
               className={cn(
                 "flex items-center gap-2.5 px-3 py-2 rounded-md text-sm transition-colors",
                 isActive
-                  ? "bg-blue-600 text-white"
-                  : "text-gray-300 hover:bg-gray-800 hover:text-white"
+                  ? "text-white"
+                  : "text-blue-100/80 hover:text-white"
               )}
+              style={isActive ? { backgroundColor: "#2D7A96" } : undefined}
             >
               <item.icon className="h-4 w-4 shrink-0" />
               {item.label}
@@ -66,17 +66,17 @@ export function AdminSidebar() {
         })}
       </nav>
 
-      <div className="p-3 border-t border-gray-700">
+      <div className="p-3 border-t" style={{ borderColor: "#255f7a" }}>
         <Link
           href="/locations"
-          className="flex items-center gap-2.5 px-3 py-2 rounded-md text-sm text-gray-300 hover:bg-gray-800 hover:text-white"
+          className="flex items-center gap-2.5 px-3 py-2 rounded-md text-sm text-blue-100/80 hover:text-white transition-colors"
         >
           <MapPin className="h-4 w-4" />
           Provider Portal
         </Link>
         <button
           onClick={() => signOut({ callbackUrl: "/login" })}
-          className="w-full flex items-center gap-2.5 px-3 py-2 rounded-md text-sm text-gray-300 hover:bg-gray-800 hover:text-white"
+          className="w-full flex items-center gap-2.5 px-3 py-2 rounded-md text-sm text-blue-100/80 hover:text-white transition-colors"
         >
           <LogOut className="h-4 w-4" />
           Sign out

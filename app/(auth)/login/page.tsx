@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import Image from "next/image"
 import { signIn } from "next-auth/react"
 import { useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
@@ -35,15 +36,15 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center p-4">
+    <div className="min-h-screen flex items-center justify-center p-4" style={{ background: "linear-gradient(135deg, #EBF5F9 0%, #d4eef7 100%)" }}>
       <div className="w-full max-w-sm space-y-6">
-        <div className="text-center">
-          <h1 className="text-2xl font-bold text-gray-900">iStrata Claims</h1>
-          <p className="text-sm text-gray-500 mt-1">Affiliate Provider Portal</p>
+        <div className="flex flex-col items-center gap-3">
+          <Image src="/logo.svg" alt="iStrata Management" width={220} height={64} priority />
+          <p className="text-sm font-medium" style={{ color: "#4d8ea8" }}>Affiliate Provider Portal</p>
         </div>
-        <Card>
-          <CardHeader>
-            <CardTitle>Sign in</CardTitle>
+        <Card className="shadow-lg border-0">
+          <CardHeader className="pb-4">
+            <CardTitle style={{ color: "#1D5570" }}>Sign in</CardTitle>
             <CardDescription>Enter your credentials to access the portal</CardDescription>
           </CardHeader>
           <CardContent>
@@ -69,7 +70,12 @@ export default function LoginPage() {
                   autoComplete="current-password"
                 />
               </div>
-              <Button type="submit" className="w-full" disabled={loading}>
+              <Button
+                type="submit"
+                className="w-full text-white font-semibold"
+                style={{ backgroundColor: "#2D7A96" }}
+                disabled={loading}
+              >
                 {loading ? "Signing in..." : "Sign in"}
               </Button>
             </form>

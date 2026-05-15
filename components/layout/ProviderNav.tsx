@@ -1,6 +1,7 @@
 "use client"
 
 import Link from "next/link"
+import Image from "next/image"
 import { usePathname } from "next/navigation"
 import { signOut } from "next-auth/react"
 import { buttonVariants } from "@/components/ui/button"
@@ -22,19 +23,16 @@ export function ProviderNav({ userName, isAdmin }: ProviderNavProps) {
   const pathname = usePathname()
 
   return (
-    <nav className="border-b bg-white px-4 py-3">
+    <nav className="border-b px-4 py-2 bg-white shadow-sm" style={{ borderColor: "#bcd9e5" }}>
       <div className="max-w-6xl mx-auto flex items-center justify-between">
-        <div className="flex items-center gap-6">
-          <Link href="/locations" className="font-semibold text-gray-900">
-            iStrata Claims
+        <div className="flex items-center gap-8">
+          <Link href="/locations">
+            <Image src="/logo.svg" alt="iStrata Management" width={150} height={44} priority />
           </Link>
           <Link
             href="/locations"
-            className={`flex items-center gap-1 text-sm ${
-              pathname.startsWith("/locations")
-                ? "text-blue-600 font-medium"
-                : "text-gray-600 hover:text-gray-900"
-            }`}
+            className="flex items-center gap-1 text-sm font-medium transition-colors"
+            style={{ color: pathname.startsWith("/locations") ? "#2D7A96" : "#4d8ea8" }}
           >
             <MapPin className="h-4 w-4" />
             Locations
@@ -42,11 +40,8 @@ export function ProviderNav({ userName, isAdmin }: ProviderNavProps) {
           {isAdmin && (
             <Link
               href="/admin"
-              className={`flex items-center gap-1 text-sm ${
-                pathname.startsWith("/admin")
-                  ? "text-blue-600 font-medium"
-                  : "text-gray-600 hover:text-gray-900"
-              }`}
+              className="flex items-center gap-1 text-sm font-medium transition-colors"
+              style={{ color: pathname.startsWith("/admin") ? "#2D7A96" : "#4d8ea8" }}
             >
               <Settings className="h-4 w-4" />
               Admin
@@ -54,7 +49,10 @@ export function ProviderNav({ userName, isAdmin }: ProviderNavProps) {
           )}
         </div>
         <DropdownMenu>
-          <DropdownMenuTrigger className={buttonVariants({ variant: "ghost" }) + " gap-1"}>
+          <DropdownMenuTrigger
+            className={buttonVariants({ variant: "ghost" }) + " gap-1"}
+            style={{ color: "#1D5570" }}
+          >
             {userName}
             <ChevronDown className="h-4 w-4" />
           </DropdownMenuTrigger>

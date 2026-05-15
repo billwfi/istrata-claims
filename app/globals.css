@@ -49,38 +49,44 @@
 }
 
 :root {
-  --background: oklch(1 0 0);
+  /* iStrata brand: teal #2D7A96, light blue #6BA8BE, pale bg #EBF5F9 */
+  --brand-primary: #2D7A96;
+  --brand-dark: #1D5570;
+  --brand-light: #6BA8BE;
+  --brand-bg: #EBF5F9;
+
+  --background: #EBF5F9;
   --foreground: oklch(0.145 0 0);
   --card: oklch(1 0 0);
   --card-foreground: oklch(0.145 0 0);
   --popover: oklch(1 0 0);
   --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
+  --primary: #2D7A96;
   --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
+  --secondary: #daeef5;
+  --secondary-foreground: #1D5570;
+  --muted: #daeef5;
+  --muted-foreground: #4d8ea8;
+  --accent: #c5e5f0;
+  --accent-foreground: #1D5570;
   --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
+  --border: #bcd9e5;
+  --input: #bcd9e5;
+  --ring: #2D7A96;
+  --chart-1: #2D7A96;
+  --chart-2: #6BA8BE;
+  --chart-3: #1D5570;
+  --chart-4: #9ec8d8;
+  --chart-5: #c5e5f0;
   --radius: 0.625rem;
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
+  --sidebar: #1D5570;
+  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar-primary: #2D7A96;
   --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
+  --sidebar-accent: #255f7a;
+  --sidebar-accent-foreground: oklch(0.985 0 0);
+  --sidebar-border: #255f7a;
+  --sidebar-ring: #6BA8BE;
 }
 
 .dark {
@@ -123,8 +129,9 @@
   }
   body {
     @apply bg-background text-foreground;
+    font-family: 'Calibri', 'Candara', 'Segoe UI', Optima, Arial, sans-serif;
   }
   html {
-    @apply font-sans;
+    font-family: 'Calibri', 'Candara', 'Segoe UI', Optima, Arial, sans-serif;
   }
 }

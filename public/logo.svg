@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 70" fill="none">
+  <!-- Left bar pair -->
+  <rect x="0" y="6" width="8" height="58" rx="1" fill="#2D7A96"/>
+  <rect x="12" y="6" width="8" height="58" rx="1" fill="#2D7A96"/>
+  <!-- strata -->
+  <text x="28" y="40" font-family="Calibri, Candara, Segoe UI, Arial, sans-serif" font-size="30" font-weight="700" fill="#2D7A96" letter-spacing="-0.5">strata</text>
+  <!-- divider line -->
+  <line x1="28" y1="46" x2="215" y2="46" stroke="#2D7A96" stroke-width="1.2"/>
+  <!-- MANAGEMENT -->
+  <text x="28" y="62" font-family="Calibri, Candara, Segoe UI, Arial, sans-serif" font-size="13" font-weight="400" fill="#6BA8BE" letter-spacing="3.5">MANAGEMENT</text>
+</svg>
