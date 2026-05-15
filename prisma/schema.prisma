@@ -1,0 +1,168 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../lib/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  ADMIN
+  PROVIDER
+}
+
+enum ClaimStatus {
+  DRAFT
+  SUBMITTED
+  IN_REVIEW
+  APPROVED
+  DENIED
+  NEEDS_MORE_INFO
+  PAID
+}
+
+model Affiliate {
+  id        String     @id @default(cuid())
+  name      String
+  users     User[]
+  locations Location[]
+  createdAt DateTime   @default(now())
+}
+
+model User {
+  id              String         @id @default(cuid())
+  email           String         @unique
+  password        String
+  name            String
+  role            Role           @default(PROVIDER)
+  affiliateId     String?
+  affiliate       Affiliate?     @relation(fields: [affiliateId], references: [id])
+  userLocations   UserLocation[]
+  submittedClaims Claim[]
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+}
+
+model Location {
+  id                String             @id @default(cuid())
+  name              String
+  address           String?
+  city              String?
+  state             String?
+  zip               String?
+  affiliateId       String
+  affiliate         Affiliate          @relation(fields: [affiliateId], references: [id])
+  userLocations     UserLocation[]
+  locationProviders LocationProvider[]
+  claims            Claim[]
+  createdAt         DateTime           @default(now())
+}
+
+model UserLocation {
+  id         String   @id @default(cuid())
+  userId     String
+  locationId String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  location   Location @relation(fields: [locationId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, locationId])
+}
+
+model Provider {
+  id                String             @id @default(cuid())
+  name              String
+  npi               String?            @unique
+  specialty         String?
+  locationProviders LocationProvider[]
+  claims            Claim[]
+  createdAt         DateTime           @default(now())
+}
+
+model LocationProvider {
+  id         String   @id @default(cuid())
+  locationId String
+  providerId String
+  location   Location @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  provider   Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+
+  @@unique([locationId, providerId])
+}
+
+model Patient {
+  id        String   @id @default(cuid())
+  firstName String
+  lastName  String
+  dob       DateTime?
+  memberId  String?
+  claims    Claim[]
+  createdAt DateTime @default(now())
+}
+
+model ServiceType {
+  id          String    @id @default(cuid())
+  name        String
+  description String?
+  cptCodes    CptCode[]
+  claims      Claim[]
+}
+
+model CptCode {
+  id            String         @id @default(cuid())
+  code          String         @unique
+  description   String
+  serviceTypeId String
+  serviceType   ServiceType    @relation(fields: [serviceTypeId], references: [id])
+  claimCptCodes ClaimCptCode[]
+}
+
+model DiagnosisCode {
+  id                  String               @id @default(cuid())
+  code                String               @unique
+  description         String
+  claimDiagnosisCodes ClaimDiagnosisCode[]
+}
+
+model Claim {
+  id                  String               @id @default(cuid())
+  locationId          String
+  patientId           String
+  providerId          String
+  serviceTypeId       String
+  dateOfService       DateTime
+  status              ClaimStatus          @default(DRAFT)
+  submittedById       String
+  submittedAt         DateTime?
+  notes               String?
+  location            Location             @relation(fields: [locationId], references: [id])
+  patient             Patient              @relation(fields: [patientId], references: [id])
+  provider            Provider             @relation(fields: [providerId], references: [id])
+  serviceType         ServiceType          @relation(fields: [serviceTypeId], references: [id])
+  submittedBy         User                 @relation(fields: [submittedById], references: [id])
+  claimCptCodes       ClaimCptCode[]
+  claimDiagnosisCodes ClaimDiagnosisCode[]
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+}
+
+model ClaimCptCode {
+  id        String  @id @default(cuid())
+  claimId   String
+  cptCodeId String
+  units     Int     @default(1)
+  claim     Claim   @relation(fields: [claimId], references: [id], onDelete: Cascade)
+  cptCode   CptCode @relation(fields: [cptCodeId], references: [id])
+
+  @@unique([claimId, cptCodeId])
+}
+
+model ClaimDiagnosisCode {
+  id              String        @id @default(cuid())
+  claimId         String
+  diagnosisCodeId String
+  sequence        Int           @default(1)
+  claim           Claim         @relation(fields: [claimId], references: [id], onDelete: Cascade)
+  diagnosisCode   DiagnosisCode @relation(fields: [diagnosisCodeId], references: [id])
+
+  @@unique([claimId, diagnosisCodeId])
+}
