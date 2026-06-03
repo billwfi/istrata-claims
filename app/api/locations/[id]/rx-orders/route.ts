@@ -2,6 +2,7 @@ import { auth } from "@/lib/auth"
 import { db } from "@/lib/db"
 import { getNbmPool, sql } from "@/lib/nbm-sql"
 import { NextRequest, NextResponse } from "next/server"
+import { devPatients, devProviders, findDevLocation, applyDevFallback } from "@/lib/dev-data"
 
 interface RxItemInput {
   productId?: string
@@ -17,6 +18,33 @@ interface RxItemInput {
   retailCost?: number
   nextFillDate?: string
   processRefillDate?: string
+}
+
+interface ResolvedPatient {
+  id: string
+  firstName: string
+  lastName: string
+  dob: Date | null
+  memberId?: string | null
+  eligibilityObjectId?: string | null
+  employeeId?: string | null
+  email?: string | null
+  phone?: string | null
+  address1?: string | null
+  address2?: string | null
+  city?: string | null
+  state?: string | null
+  zip?: string | null
+  groupId?: string | null
+  groupName?: string | null
+}
+
+function getNbmEligibilityId(value: unknown) {
+  const text = String(value || "")
+  if (!text.startsWith("nbm-eligibility-")) return null
+
+  const id = Number(text.replace("nbm-eligibility-", ""))
+  return Number.isInteger(id) && id > 0 ? id : null
 }
 
 function asDate(value?: string | null) {
@@ -40,6 +68,82 @@ function formatOrderNumber() {
 
 function renderTemplate(template: string | null, values: Record<string, string>) {
   return (template || "").replace(/\{\{(\w+)\}\}/g, (_, key) => values[key] || "")
+}
+
+async function findNbmEligibilityPatient(pool: sql.ConnectionPool, patientId: unknown): Promise<ResolvedPatient | null> {
+  const eligibilityId = getNbmEligibilityId(patientId)
+  if (!eligibilityId) return null
+
+  const result = await pool.request()
+    .input("eligibilityId", sql.BigInt, eligibilityId)
+    .query(`
+      SELECT TOP 1
+        CONVERT(nvarchar(100), id) AS eligibilityObjectId,
+        first_name AS firstName,
+        last_name AS lastName,
+        dob,
+        COALESCE(NULLIF(insurance_id, ''), NULLIF(employee_id, ''), source_key) AS memberId,
+        employee_id AS employeeId,
+        COALESCE(NULLIF(personal_email, ''), NULLIF(work_email, '')) AS email,
+        phone,
+        address1,
+        address2,
+        city,
+        state,
+        zip,
+        group_id AS groupId,
+        group_name AS groupName
+      FROM dbo.nbm_full_eligibility
+      WHERE id = @eligibilityId
+    `)
+
+  const row = result.recordset[0]
+  if (!row) return null
+
+  return {
+    id: `nbm-eligibility-${row.eligibilityObjectId}`,
+    firstName: row.firstName,
+    lastName: row.lastName,
+    dob: row.dob || null,
+    memberId: row.memberId || null,
+    eligibilityObjectId: row.eligibilityObjectId,
+    employeeId: row.employeeId || null,
+    email: row.email || null,
+    phone: row.phone || null,
+    address1: row.address1 || null,
+    address2: row.address2 || null,
+    city: row.city || null,
+    state: row.state || null,
+    zip: row.zip || null,
+    groupId: row.groupId || null,
+    groupName: row.groupName || null,
+  }
+}
+
+async function findLocalPatient(patientId: string): Promise<ResolvedPatient | null> {
+  const patient = await db.patient.findUnique({ where: { id: patientId } })
+  if (!patient) return null
+
+  return {
+    id: patient.id,
+    firstName: patient.firstName,
+    lastName: patient.lastName,
+    dob: patient.dob || null,
+    memberId: patient.memberId || null,
+  }
+}
+
+function findLocalDevPatient(patientId: string): ResolvedPatient | null {
+  const patient = devPatients.find((devPatient) => devPatient.id === patientId)
+  if (!patient) return null
+
+  return {
+    id: patient.id,
+    firstName: patient.firstName,
+    lastName: patient.lastName,
+    dob: patient.dob || null,
+    memberId: patient.memberId || null,
+  }
 }
 
 export async function POST(
@@ -70,20 +174,37 @@ export async function POST(
     if (!access) return NextResponse.json({ error: "Forbidden" }, { status: 403 })
   }
 
-  const [location, patient, provider] = await Promise.all([
-    db.location.findUnique({
-      where: { id: locationId },
-      include: { affiliate: true },
-    }),
-    db.patient.findUnique({ where: { id: body.patientId } }),
-    db.provider.findUnique({ where: { id: body.providerId } }),
-  ])
+  const pool = await getNbmPool()
+  const nbmEligibilityPatient = getNbmEligibilityId(body.patientId)
+
+  const [location, patient, provider] = await (async () => {
+    try {
+      return await Promise.all([
+        db.location.findUnique({
+          where: { id: locationId },
+          include: { affiliate: true },
+        }),
+        nbmEligibilityPatient
+          ? findNbmEligibilityPatient(pool, body.patientId)
+          : findLocalPatient(body.patientId),
+        db.provider.findUnique({ where: { id: body.providerId } }),
+      ])
+    } catch (err) {
+      applyDevFallback("rx order submit lookups", err)
+      return await Promise.all([
+        Promise.resolve(findDevLocation(locationId)),
+        nbmEligibilityPatient
+          ? findNbmEligibilityPatient(pool, body.patientId)
+          : Promise.resolve(findLocalDevPatient(body.patientId)),
+        Promise.resolve(devProviders.find((provider) => provider.id === body.providerId) || null),
+      ])
+    }
+  })()
 
   if (!location || !patient || !provider) {
     return NextResponse.json({ error: "Location, patient, or provider not found" }, { status: 404 })
   }
 
-  const pool = await getNbmPool()
   const tx = new sql.Transaction(pool)
   await tx.begin()
 
@@ -91,6 +212,13 @@ export async function POST(
     const orderNumber = formatOrderNumber()
     const patientName = `${patient.firstName} ${patient.lastName}`.trim()
     const submittedAt = new Date()
+    const patientEmail = body.patientEmail || patient.email || null
+    const patientPhone = body.patientPhone || patient.phone || null
+    const shippingAddress1 = body.shippingAddress1 || patient.address1 || null
+    const shippingAddress2 = body.shippingAddress2 || patient.address2 || null
+    const shippingCity = body.shippingCity || patient.city || null
+    const shippingState = body.shippingState || patient.state || null
+    const shippingZip = body.shippingZip || patient.zip || null
 
     const orderResult = await tx.request()
       .input("orderNumber", sql.NVarChar(32), orderNumber)
@@ -103,32 +231,40 @@ export async function POST(
       .input("locationName", sql.NVarChar(200), location.name)
       .input("affiliateId", sql.NVarChar(100), location.affiliateId)
       .input("affiliateName", sql.NVarChar(200), location.affiliate.name)
+      .input("eligibilityObjectId", sql.NVarChar(100), patient.eligibilityObjectId || null)
+      .input("patientEmployeeId", sql.NVarChar(100), patient.employeeId || null)
       .input("patientMemberId", sql.NVarChar(100), patient.memberId || null)
       .input("patientFirstName", sql.NVarChar(100), patient.firstName)
       .input("patientLastName", sql.NVarChar(100), patient.lastName)
       .input("patientDob", sql.Date, patient.dob || null)
-      .input("patientEmail", sql.NVarChar(255), body.patientEmail || null)
-      .input("patientPhone", sql.NVarChar(50), body.patientPhone || null)
-      .input("shippingAddress1", sql.NVarChar(255), body.shippingAddress1 || null)
-      .input("shippingAddress2", sql.NVarChar(255), body.shippingAddress2 || null)
-      .input("shippingCity", sql.NVarChar(100), body.shippingCity || null)
-      .input("shippingState", sql.NVarChar(50), body.shippingState || null)
-      .input("shippingZip", sql.NVarChar(30), body.shippingZip || null)
+      .input("patientEmail", sql.NVarChar(255), patientEmail)
+      .input("patientPhone", sql.NVarChar(50), patientPhone)
+      .input("groupId", sql.NVarChar(100), patient.groupId || null)
+      .input("groupName", sql.NVarChar(200), patient.groupName || null)
+      .input("shippingAddress1", sql.NVarChar(255), shippingAddress1)
+      .input("shippingAddress2", sql.NVarChar(255), shippingAddress2)
+      .input("shippingCity", sql.NVarChar(100), shippingCity)
+      .input("shippingState", sql.NVarChar(50), shippingState)
+      .input("shippingZip", sql.NVarChar(30), shippingZip)
       .input("deliveryMethod", sql.NVarChar(50), body.deliveryMethod || null)
       .input("providerNotes", sql.NVarChar(sql.MAX), body.notes || null)
       .query(`
         INSERT INTO dbo.nbm_rx_orders (
           order_number, source_reference, provider_user_id, provider_name, provider_email, provider_npi,
-          location_id, location_name, affiliate_id, affiliate_name, patient_member_id,
+          location_id, location_name, affiliate_id, affiliate_name,
+          eligibility_object_id, patient_employee_id, patient_member_id,
           patient_first_name, patient_last_name, patient_dob, patient_email, patient_phone,
+          group_id, group_name,
           shipping_address1, shipping_address2, shipping_city, shipping_state, shipping_zip,
           delivery_method, provider_notes, submitted_by
         )
         OUTPUT inserted.id
         VALUES (
           @orderNumber, @sourceReference, @providerUserId, @providerName, @providerEmail, @providerNpi,
-          @locationId, @locationName, @affiliateId, @affiliateName, @patientMemberId,
+          @locationId, @locationName, @affiliateId, @affiliateName,
+          @eligibilityObjectId, @patientEmployeeId, @patientMemberId,
           @patientFirstName, @patientLastName, @patientDob, @patientEmail, @patientPhone,
+          @groupId, @groupName,
           @shippingAddress1, @shippingAddress2, @shippingCity, @shippingState, @shippingZip,
           @deliveryMethod, @providerNotes, @providerUserId
         )
@@ -212,7 +348,7 @@ export async function POST(
       WHERE active = 1
     `)
 
-    const recipientEmail = body.patientEmail || session.user.email
+    const recipientEmail = patientEmail || session.user.email
     for (const createdItem of createdItems) {
       for (const rule of rules.recordset) {
         const baseDate =

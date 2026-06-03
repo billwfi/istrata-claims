@@ -20,6 +20,15 @@ interface PatientOption {
   firstName: string
   lastName: string
   memberId?: string | null
+  email?: string | null
+  phone?: string | null
+  address1?: string | null
+  address2?: string | null
+  city?: string | null
+  state?: string | null
+  zip?: string | null
+  groupName?: string | null
+  source?: string | null
 }
 
 interface ProviderOption {
@@ -101,10 +110,10 @@ export function NewRxOrderForm({ locationId }: NewRxOrderFormProps) {
 
   const handlePatientSearch = useCallback((q: string) => {
     setPatientLoading(true)
-    fetch(`/api/patients?q=${encodeURIComponent(q)}`)
+    fetch(`/api/patients?q=${encodeURIComponent(q)}&includeNbmEligibility=1`)
       .then((r) => r.json())
       .then((data) => {
-        setPatients(data)
+        setPatients(Array.isArray(data) ? data : [])
         setPatientLoading(false)
       })
       .catch(() => {
@@ -142,6 +151,21 @@ export function NewRxOrderForm({ locationId }: NewRxOrderFormProps) {
     handleProviderSearch("")
     handleProductSearch("")
   }, [handlePatientSearch, handleProviderSearch, handleProductSearch])
+
+  function selectPatient(value: string | null) {
+    setPatientId(value ?? "")
+
+    const patient = patients.find((p) => p.id === value)
+    if (!patient) return
+
+    setPatientEmail(patient.email || "")
+    setPatientPhone(patient.phone || "")
+    setShippingAddress1(patient.address1 || "")
+    setShippingAddress2(patient.address2 || "")
+    setShippingCity(patient.city || "")
+    setShippingState(patient.state || "")
+    setShippingZip(patient.zip || "")
+  }
 
   function updateItem(index: number, patch: Partial<RxItem>) {
     setItems((current) => current.map((item, i) => i === index ? { ...item, ...patch } : item))
@@ -237,10 +261,15 @@ export function NewRxOrderForm({ locationId }: NewRxOrderFormProps) {
               options={patients.map((p) => ({
                 value: p.id,
                 label: `${p.lastName}, ${p.firstName}`,
-                sublabel: p.memberId ? `Member: ${p.memberId}` : undefined,
+                sublabel: [
+                  p.source === "nbm_eligibility" ? "NBM eligibility" : null,
+                  p.memberId ? `Member: ${p.memberId}` : null,
+                  p.email || null,
+                  p.groupName || null,
+                ].filter(Boolean).join(" | ") || undefined,
               }))}
               value={patientId}
-              onValueChange={(v) => setPatientId(v ?? "")}
+              onValueChange={selectPatient}
               placeholder="Search patients..."
               searchPlaceholder="Type to search patients..."
               onSearch={handlePatientSearch}

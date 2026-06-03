@@ -40,15 +40,18 @@ Files:
 - `app/api/patients/route.ts`
 - `app/api/locations/[id]/providers/route.ts`
 - `app/api/locations/[id]/claims/route.ts`
+- `app/api/locations/[id]/rx-orders/route.ts`
 
 Concern:
 
 Several provider-facing APIs verify that a user is authenticated, but do not consistently verify that the user has access to the requested location or patient data before returning or creating records.
+The NBM RX patient search path can now include `NBM.dbo.nbm_full_eligibility` rows when `includeNbmEligibility=1`, so eligibility lookup scoping should be tightened before production use.
 
 Recommended fix:
 
 - Add a shared location-access guard for provider routes.
 - Ensure every patient/provider/claim lookup is constrained by the authenticated user's allowed locations or affiliate.
+- Constrain NBM eligibility searches by the requesting provider's allowed location/group/affiliate when the business mapping is confirmed.
 - Return `403` before performing data queries when access is not confirmed.
 
 ### Management Write APIs Only Require Any Valid Token
