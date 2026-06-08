@@ -13,9 +13,10 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { ClaimStatusBadge } from "@/components/claims/ClaimStatusBadge"
-import { Plus, FileText } from "lucide-react"
+import { Plus, FileText, PackagePlus } from "lucide-react"
 import { format } from "date-fns"
 import type { ClaimStatus } from "@/lib/generated/prisma/client"
+import { findDevLocation, applyDevFallback } from "@/lib/dev-data"
 
 const STATUS_TABS: Array<{ value: string; label: string; status?: ClaimStatus }> = [
   { value: "all", label: "All" },
@@ -39,31 +40,42 @@ export default async function LocationClaimsPage({
 
   const isAdmin = session.user.role === "ADMIN"
 
-  const location = await db.location.findUnique({
-    where: { id },
-    include: { affiliate: true },
-  })
+  const { location, claims } = await (async () => {
+    try {
+      const location = await db.location.findUnique({
+        where: { id },
+        include: { affiliate: true },
+      })
+
+      if (!location) return { location: null, claims: [] }
+
+      // Verify access
+      if (!isAdmin) {
+        const access = await db.userLocation.findUnique({
+          where: { userId_locationId: { userId: session.user.id, locationId: id } },
+        })
+        if (!access) redirect("/locations")
+      }
+
+      const claims = await db.claim.findMany({
+        where: { locationId: id },
+        include: {
+          patient: true,
+          provider: true,
+          serviceType: true,
+          submittedBy: { select: { name: true } },
+        },
+        orderBy: { createdAt: "desc" },
+      })
+
+      return { location, claims }
+    } catch (err) {
+      applyDevFallback("location detail page", err)
+      return { location: findDevLocation(id), claims: [] }
+    }
+  })()
 
   if (!location) notFound()
-
-  // Verify access
-  if (!isAdmin) {
-    const access = await db.userLocation.findUnique({
-      where: { userId_locationId: { userId: session.user.id, locationId: id } },
-    })
-    if (!access) redirect("/locations")
-  }
-
-  const claims = await db.claim.findMany({
-    where: { locationId: id },
-    include: {
-      patient: true,
-      provider: true,
-      serviceType: true,
-      submittedBy: { select: { name: true } },
-    },
-    orderBy: { createdAt: "desc" },
-  })
 
   return (
     <div className="space-y-6">
@@ -79,12 +91,20 @@ export default async function LocationClaimsPage({
           <h1 className="text-2xl font-bold text-gray-900">{location.name}</h1>
           <p className="text-gray-500">{location.affiliate.name}</p>
         </div>
-        <Link href={`/locations/${id}/claims/new`}>
-          <Button className="gap-2">
-            <Plus className="h-4 w-4" />
-            New Claim
-          </Button>
-        </Link>
+        <div className="flex gap-2">
+          <Link href={`/locations/${id}/rx/new`}>
+            <Button className="gap-2">
+              <PackagePlus className="h-4 w-4" />
+              New RX Order
+            </Button>
+          </Link>
+          <Link href={`/locations/${id}/claims/new`}>
+            <Button variant="outline" className="gap-2">
+              <Plus className="h-4 w-4" />
+              New Claim
+            </Button>
+          </Link>
+        </div>
       </div>
 
       <Tabs defaultValue="all">
@@ -172,3 +192,4 @@ export default async function LocationClaimsPage({
     </div>
   )
 }
+

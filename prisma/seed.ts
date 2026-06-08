@@ -149,7 +149,7 @@ async function main() {
   })
 
   // Sample patient
-  const patient = await db.patient.upsert({
+  await db.patient.upsert({
     where: { id: "seed-patient-1" },
     update: {},
     create: {

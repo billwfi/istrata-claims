@@ -1,4 +1,3 @@
-import { Badge } from "@/components/ui/badge"
 import type { ClaimStatus } from "@/lib/generated/prisma/client"
 
 const statusConfig: Record<ClaimStatus, { label: string; variant: "default" | "secondary" | "destructive" | "outline" }> = {
