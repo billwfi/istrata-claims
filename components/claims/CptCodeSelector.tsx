@@ -54,6 +54,8 @@ export function CptCodeSelector({ serviceTypeId, value, onChange }: CptCodeSelec
       sublabel: c.code,
     }))
 
+  void options
+
   function addLine() {
     onChange([...value, { cptCodeId: "", units: 1 }])
   }
@@ -70,6 +72,7 @@ export function CptCodeSelector({ serviceTypeId, value, onChange }: CptCodeSelec
     <div className="space-y-3">
       {value.map((line, index) => {
         const selectedCode = cptCodes.find((c) => c.id === line.cptCodeId)
+        void selectedCode
         const lineOptions = cptCodes
           .filter(
             (c) =>

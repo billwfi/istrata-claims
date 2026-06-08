@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useCallback, useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
 import { Button, buttonVariants } from "@/components/ui/button"
 import { Label } from "@/components/ui/label"
@@ -87,7 +87,7 @@ export function NewClaimForm({ locationId, serviceTypes }: NewClaimFormProps) {
       })
   }
 
-  function handleProviderSearch(q: string) {
+  const handleProviderSearch = useCallback((q: string) => {
     setProviderLoading(true)
     fetch(`/api/locations/${locationId}/providers?q=${encodeURIComponent(q)}`)
       .then((r) => r.json())
@@ -95,13 +95,13 @@ export function NewClaimForm({ locationId, serviceTypes }: NewClaimFormProps) {
         setProviders(data)
         setProviderLoading(false)
       })
-  }
+  }, [locationId])
 
   // Load initial patient/provider lists
   useEffect(() => {
     handlePatientSearch("")
     handleProviderSearch("")
-  }, [])
+  }, [handleProviderSearch])
 
   async function submit(status: "DRAFT" | "SUBMITTED") {
     if (status === "SUBMITTED") {

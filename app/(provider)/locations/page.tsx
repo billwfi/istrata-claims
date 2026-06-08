@@ -4,6 +4,7 @@ import { redirect } from "next/navigation"
 import Link from "next/link"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { MapPin } from "lucide-react"
+import { devLocations, applyDevFallback } from "@/lib/dev-data"
 
 export default async function LocationsPage() {
   const session = await auth()
@@ -12,18 +13,25 @@ export default async function LocationsPage() {
   const isAdmin = session.user.role === "ADMIN"
 
   // Admins see all locations; providers see only their assigned locations
-  const locations = isAdmin
-    ? await db.location.findMany({
-        include: { affiliate: true },
-        orderBy: [{ affiliate: { name: "asc" } }, { name: "asc" }],
-      })
-    : await db.location.findMany({
-        where: {
-          userLocations: { some: { userId: session.user.id } },
-        },
-        include: { affiliate: true },
-        orderBy: [{ affiliate: { name: "asc" } }, { name: "asc" }],
-      })
+  const locations = await (async () => {
+    try {
+      return isAdmin
+        ? await db.location.findMany({
+            include: { affiliate: true },
+            orderBy: [{ affiliate: { name: "asc" } }, { name: "asc" }],
+          })
+        : await db.location.findMany({
+            where: {
+              userLocations: { some: { userId: session.user.id } },
+            },
+            include: { affiliate: true },
+            orderBy: [{ affiliate: { name: "asc" } }, { name: "asc" }],
+          })
+    } catch (err) {
+      applyDevFallback("locations page", err)
+      return devLocations
+    }
+  })()
 
   // If user has exactly one location, auto-redirect there
   if (locations.length === 1) {
@@ -74,3 +82,4 @@ export default async function LocationsPage() {
     </div>
   )
 }
+
