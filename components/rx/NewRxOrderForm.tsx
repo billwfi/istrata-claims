@@ -61,35 +61,60 @@ interface RxItem {
   productId: string
   productName: string
   productSku: string
-  therapyType: string
   productFormType: string
   dosage: string
-  numberOfBottles: string
   refillFrequencyDays: string
   refillDurationMonths: string
   automaticRefill: boolean
   copayAmount: string
   retailCost: string
-  nextFillDate: string
-  processRefillDate: string
 }
+
+const orderCategories = ["Initial RX", "Refill"] as const
+const deliveryMethods = ["Local", "Mail"] as const
 
 const emptyItem = (): RxItem => ({
   productId: "",
   productName: "",
   productSku: "",
-  therapyType: "",
   productFormType: "",
   dosage: "",
-  numberOfBottles: "1",
-  refillFrequencyDays: "",
+  refillFrequencyDays: "30",
   refillDurationMonths: "",
   automaticRefill: true,
   copayAmount: "",
   retailCost: "",
-  nextFillDate: "",
-  processRefillDate: "",
 })
+
+function toDateInput(date: Date) {
+  const yyyy = date.getFullYear()
+  const mm = String(date.getMonth() + 1).padStart(2, "0")
+  const dd = String(date.getDate()).padStart(2, "0")
+  return `${yyyy}-${mm}-${dd}`
+}
+
+function addDays(date: Date, days: number) {
+  const next = new Date(date)
+  next.setDate(next.getDate() + days)
+  return next
+}
+
+function addMonths(date: Date, months: number) {
+  const next = new Date(date)
+  next.setMonth(next.getMonth() + months)
+  return next
+}
+
+function calculatedDates(item: RxItem) {
+  const frequencyDays = Number(item.refillFrequencyDays || 30)
+  const processRefillDate = addDays(new Date(), Number.isFinite(frequencyDays) && frequencyDays > 0 ? frequencyDays : 30)
+  return {
+    nextFillDate: toDateInput(processRefillDate),
+    processRefillDate: toDateInput(processRefillDate),
+    sixMonthProcessRefillDate: toDateInput(addMonths(processRefillDate, 6)),
+    nineMonthProcessRefillDate: toDateInput(addMonths(processRefillDate, 9)),
+  }
+}
 
 export function NewRxOrderForm({ locationId }: NewRxOrderFormProps) {
   const router = useRouter()
@@ -104,7 +129,8 @@ export function NewRxOrderForm({ locationId }: NewRxOrderFormProps) {
   const [shippingCity, setShippingCity] = useState("")
   const [shippingState, setShippingState] = useState("")
   const [shippingZip, setShippingZip] = useState("")
-  const [deliveryMethod, setDeliveryMethod] = useState("")
+  const [orderCategory, setOrderCategory] = useState<(typeof orderCategories)[number]>("Initial RX")
+  const [deliveryMethod, setDeliveryMethod] = useState<(typeof deliveryMethods)[number]>("Local")
   const [notes, setNotes] = useState("")
   const [items, setItems] = useState<RxItem[]>([emptyItem()])
 
@@ -255,7 +281,6 @@ export function NewRxOrderForm({ locationId }: NewRxOrderFormProps) {
       productId: product.id,
       productName: product.itemName,
       productSku: product.itemSku || "",
-      therapyType: product.itemType || product.clinicalTier || "",
       productFormType: product.productFormType || "",
       copayAmount: product.copaymentTier == null ? "" : String(product.copaymentTier),
       retailCost: product.retailCost == null ? "" : String(product.retailCost),
@@ -280,6 +305,7 @@ export function NewRxOrderForm({ locationId }: NewRxOrderFormProps) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          orderCategory,
           patientId,
           providerId,
           patientEmail: patientEmail.trim() || null,
@@ -289,22 +315,26 @@ export function NewRxOrderForm({ locationId }: NewRxOrderFormProps) {
           shippingCity: shippingCity.trim() || null,
           shippingState: shippingState.trim() || null,
           shippingZip: shippingZip.trim() || null,
-          deliveryMethod: deliveryMethod.trim() || null,
+          deliveryMethod,
           notes: notes.trim() || null,
-          items: validItems.map((item) => ({
-            ...item,
-            productName: item.productName.trim(),
-            productId: item.productId || null,
-            productSku: item.productSku.trim() || null,
-            therapyType: item.therapyType.trim() || null,
-            productFormType: item.productFormType.trim() || null,
-            dosage: item.dosage.trim() || null,
-            numberOfBottles: item.numberOfBottles ? Number(item.numberOfBottles) : null,
-            refillFrequencyDays: item.refillFrequencyDays ? Number(item.refillFrequencyDays) : null,
-            refillDurationMonths: item.refillDurationMonths ? Number(item.refillDurationMonths) : null,
-            copayAmount: item.copayAmount ? Number(item.copayAmount) : null,
-            retailCost: item.retailCost ? Number(item.retailCost) : null,
-          })),
+          items: validItems.map((item) => {
+            const dates = calculatedDates(item)
+            return {
+              productName: item.productName.trim(),
+              productId: item.productId || null,
+              productSku: item.productSku.trim() || null,
+              productFormType: item.productFormType.trim() || null,
+              dosage: item.dosage.trim() || null,
+              numberOfBottles: 1,
+              refillFrequencyDays: item.refillFrequencyDays ? Number(item.refillFrequencyDays) : 30,
+              refillDurationMonths: item.refillDurationMonths ? Number(item.refillDurationMonths) : null,
+              automaticRefill: item.automaticRefill,
+              copayAmount: item.copayAmount ? Number(item.copayAmount) : null,
+              retailCost: item.retailCost ? Number(item.retailCost) : null,
+              nextFillDate: dates.nextFillDate,
+              processRefillDate: dates.processRefillDate,
+            }
+          }),
         }),
       })
 
@@ -373,6 +403,34 @@ export function NewRxOrderForm({ locationId }: NewRxOrderFormProps) {
       <Card>
       <CardContent className="p-6 space-y-8">
         <div className="grid gap-6 md:grid-cols-2">
+          <div className="space-y-2">
+            <Label htmlFor="order-category">NBM category</Label>
+            <select
+              id="order-category"
+              className="h-8 w-full rounded-lg border border-input bg-transparent px-2.5 py-1 text-sm"
+              value={orderCategory}
+              onChange={(e) => setOrderCategory(e.target.value as (typeof orderCategories)[number])}
+            >
+              {orderCategories.map((category) => (
+                <option key={category} value={category}>{category}</option>
+              ))}
+            </select>
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="delivery-method">Delivery method</Label>
+            <select
+              id="delivery-method"
+              className="h-8 w-full rounded-lg border border-input bg-transparent px-2.5 py-1 text-sm"
+              value={deliveryMethod}
+              onChange={(e) => setDeliveryMethod(e.target.value as (typeof deliveryMethods)[number])}
+            >
+              {deliveryMethods.map((method) => (
+                <option key={method} value={method}>{method}</option>
+              ))}
+            </select>
+          </div>
+
           <div className="space-y-2">
             <Label>Patient <span className="text-red-500">*</span></Label>
             <SearchCombobox
@@ -448,10 +506,6 @@ export function NewRxOrderForm({ locationId }: NewRxOrderFormProps) {
                 <Input id="ship-zip" value={shippingZip} onChange={(e) => setShippingZip(e.target.value)} />
               </div>
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="delivery-method">Delivery method</Label>
-              <Input id="delivery-method" placeholder="Mail, pickup, courier" value={deliveryMethod} onChange={(e) => setDeliveryMethod(e.target.value)} />
-            </div>
           </div>
         </div>
 
@@ -465,7 +519,10 @@ export function NewRxOrderForm({ locationId }: NewRxOrderFormProps) {
           </div>
 
           <div className="space-y-4">
-            {items.map((item, index) => (
+            {items.map((item, index) => {
+              const dates = calculatedDates(item)
+
+              return (
               <div key={index} className="rounded-lg border bg-white p-4 space-y-4">
                 <div className="flex items-center justify-between">
                   <h3 className="font-medium text-gray-900">Product {index + 1}</h3>
@@ -496,15 +553,11 @@ export function NewRxOrderForm({ locationId }: NewRxOrderFormProps) {
                   </div>
                   <div className="space-y-2">
                     <Label>SKU</Label>
-                    <Input value={item.productSku} onChange={(e) => updateItem(index, { productSku: e.target.value })} />
-                  </div>
-                  <div className="space-y-2">
-                    <Label>Therapy type</Label>
-                    <Input value={item.therapyType} onChange={(e) => updateItem(index, { therapyType: e.target.value })} />
+                    <Input value={item.productSku} readOnly />
                   </div>
                   <div className="space-y-2">
                     <Label>Product form</Label>
-                    <Input value={item.productFormType} onChange={(e) => updateItem(index, { productFormType: e.target.value })} />
+                    <Input value={item.productFormType} readOnly />
                   </div>
                   <div className="space-y-2">
                     <Label>Dosage</Label>
@@ -512,7 +565,9 @@ export function NewRxOrderForm({ locationId }: NewRxOrderFormProps) {
                   </div>
                   <div className="space-y-2">
                     <Label>Bottles</Label>
-                    <Input type="number" min="1" value={item.numberOfBottles} onChange={(e) => updateItem(index, { numberOfBottles: e.target.value })} />
+                    <div className="flex h-8 items-center rounded-lg border border-input px-2.5 text-sm text-gray-700">
+                      1 bottle
+                    </div>
                   </div>
                   <div className="space-y-2">
                     <Label>Refill frequency days</Label>
@@ -524,19 +579,27 @@ export function NewRxOrderForm({ locationId }: NewRxOrderFormProps) {
                   </div>
                   <div className="space-y-2">
                     <Label>Copay</Label>
-                    <Input type="number" min="0" step="0.01" value={item.copayAmount} onChange={(e) => updateItem(index, { copayAmount: e.target.value })} />
+                    <Input type="number" min="0" step="0.01" value={item.copayAmount} readOnly />
                   </div>
                   <div className="space-y-2">
                     <Label>Retail cost</Label>
-                    <Input type="number" min="0" step="0.01" value={item.retailCost} onChange={(e) => updateItem(index, { retailCost: e.target.value })} />
+                    <Input type="number" min="0" step="0.01" value={item.retailCost} readOnly />
                   </div>
                   <div className="space-y-2">
                     <Label>Next fill date</Label>
-                    <Input type="date" value={item.nextFillDate} onChange={(e) => updateItem(index, { nextFillDate: e.target.value })} />
+                    <Input type="date" value={dates.nextFillDate} readOnly />
                   </div>
                   <div className="space-y-2">
                     <Label>Process refill date</Label>
-                    <Input type="date" value={item.processRefillDate} onChange={(e) => updateItem(index, { processRefillDate: e.target.value })} />
+                    <Input type="date" value={dates.processRefillDate} readOnly />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Six month process date</Label>
+                    <Input type="date" value={dates.sixMonthProcessRefillDate} readOnly />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Nine month process date</Label>
+                    <Input type="date" value={dates.nineMonthProcessRefillDate} readOnly />
                   </div>
                   <label className="flex items-center gap-2 text-sm text-gray-700 pt-7">
                     <input
@@ -548,7 +611,8 @@ export function NewRxOrderForm({ locationId }: NewRxOrderFormProps) {
                   </label>
                 </div>
               </div>
-            ))}
+              )
+            })}
           </div>
         </div>
 

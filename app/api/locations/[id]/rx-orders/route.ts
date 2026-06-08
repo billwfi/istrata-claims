@@ -9,9 +9,7 @@ interface RxItemInput {
   productId?: string
   productName?: string
   productSku?: string
-  therapyType?: string
   dosage?: string
-  numberOfBottles?: number
   refillFrequencyDays?: number
   refillDurationMonths?: number
   automaticRefill?: boolean
@@ -20,6 +18,9 @@ interface RxItemInput {
   nextFillDate?: string
   processRefillDate?: string
 }
+
+const VALID_ORDER_CATEGORIES = new Set(["Initial RX", "Refill"])
+const VALID_DELIVERY_METHODS = new Set(["Local", "Mail"])
 
 interface ResolvedPatient {
   id: string
@@ -58,6 +59,23 @@ function asNumber(value: unknown) {
   if (value === "" || value == null) return null
   const parsed = Number(value)
   return Number.isFinite(parsed) ? parsed : null
+}
+
+function addDays(date: Date, days: number) {
+  const next = new Date(date)
+  next.setDate(next.getDate() + days)
+  return next
+}
+
+function addMonths(date: Date, months: number) {
+  const next = new Date(date)
+  next.setMonth(next.getMonth() + months)
+  return next
+}
+
+function getRefillFrequencyDays(value: unknown) {
+  const parsed = asNumber(value)
+  return parsed && parsed > 0 ? parsed : 30
 }
 
 function formatOrderNumber() {
@@ -157,9 +175,19 @@ export async function POST(
 
   const body = await req.json()
   const items = Array.isArray(body.items) ? body.items as RxItemInput[] : []
+  const orderCategory = String(body.orderCategory || body.sourceReference || "Initial RX").trim()
+  const deliveryMethod = String(body.deliveryMethod || "Local").trim()
 
   if (!body.patientId || !body.providerId || items.length === 0) {
     return NextResponse.json({ error: "Patient, provider, and at least one product are required" }, { status: 400 })
+  }
+
+  if (!VALID_ORDER_CATEGORIES.has(orderCategory)) {
+    return NextResponse.json({ error: "Invalid NBM category" }, { status: 400 })
+  }
+
+  if (!VALID_DELIVERY_METHODS.has(deliveryMethod)) {
+    return NextResponse.json({ error: "Invalid delivery method" }, { status: 400 })
   }
 
   const validItems = items.filter((item) => item.productName?.trim())
@@ -237,7 +265,7 @@ export async function POST(
 
     const orderResult = await tx.request()
       .input("orderNumber", sql.NVarChar(32), orderNumber)
-      .input("sourceReference", sql.NVarChar(100), null)
+      .input("sourceReference", sql.NVarChar(100), orderCategory)
       .input("providerUserId", sql.NVarChar(100), session.user.id)
       .input("providerName", sql.NVarChar(200), provider.name)
       .input("providerEmail", sql.NVarChar(255), session.user.email)
@@ -261,7 +289,7 @@ export async function POST(
       .input("shippingCity", sql.NVarChar(100), shippingCity)
       .input("shippingState", sql.NVarChar(50), shippingState)
       .input("shippingZip", sql.NVarChar(30), shippingZip)
-      .input("deliveryMethod", sql.NVarChar(50), body.deliveryMethod || null)
+      .input("deliveryMethod", sql.NVarChar(50), deliveryMethod)
       .input("providerNotes", sql.NVarChar(sql.MAX), body.notes || null)
       .query(`
         INSERT INTO dbo.nbm_rx_orders (
@@ -289,12 +317,11 @@ export async function POST(
     const createdItems: Array<{ id: string; productName: string; processRefillDate: Date | null; nextFillDate: Date | null; sixMonthDate: Date | null; nineMonthDate: Date | null }> = []
 
     for (const [index, item] of validItems.entries()) {
-      const processRefillDate = asDate(item.processRefillDate)
-      const nextFillDate = asDate(item.nextFillDate)
-      const sixMonthDate = processRefillDate ? new Date(processRefillDate) : null
-      if (sixMonthDate) sixMonthDate.setMonth(sixMonthDate.getMonth() + 6)
-      const nineMonthDate = processRefillDate ? new Date(processRefillDate) : null
-      if (nineMonthDate) nineMonthDate.setMonth(nineMonthDate.getMonth() + 9)
+      const refillFrequencyDays = getRefillFrequencyDays(item.refillFrequencyDays)
+      const processRefillDate = asDate(item.processRefillDate) || addDays(submittedAt, refillFrequencyDays)
+      const nextFillDate = asDate(item.nextFillDate) || processRefillDate
+      const sixMonthDate = addMonths(processRefillDate, 6)
+      const nineMonthDate = addMonths(processRefillDate, 9)
 
       const itemResult = await tx.request()
         .input("orderId", sql.UniqueIdentifier, orderId)
@@ -302,10 +329,10 @@ export async function POST(
         .input("productId", sql.NVarChar(100), item.productId || null)
         .input("productSku", sql.NVarChar(100), item.productSku || null)
         .input("productName", sql.NVarChar(255), item.productName?.trim())
-        .input("therapyType", sql.NVarChar(100), item.therapyType || null)
+        .input("therapyType", sql.NVarChar(100), null)
         .input("dosage", sql.NVarChar(100), item.dosage || null)
-        .input("numberOfBottles", sql.Int, asNumber(item.numberOfBottles))
-        .input("refillFrequencyDays", sql.Int, asNumber(item.refillFrequencyDays))
+        .input("numberOfBottles", sql.Int, 1)
+        .input("refillFrequencyDays", sql.Int, refillFrequencyDays)
         .input("refillDurationMonths", sql.Int, asNumber(item.refillDurationMonths))
         .input("automaticRefill", sql.Bit, Boolean(item.automaticRefill))
         .input("copayAmount", sql.Decimal(12, 2), asNumber(item.copayAmount))
@@ -350,7 +377,7 @@ export async function POST(
 
     await tx.request()
       .input("orderId", sql.UniqueIdentifier, orderId)
-      .input("payload", sql.NVarChar(sql.MAX), JSON.stringify({ orderNumber, submittedAt }))
+      .input("payload", sql.NVarChar(sql.MAX), JSON.stringify({ orderNumber, orderCategory, deliveryMethod, submittedAt }))
       .input("createdBy", sql.NVarChar(100), session.user.id)
       .query(`
         INSERT INTO dbo.nbm_workflow_events (order_id, event_type, event_source, payload_json, created_by)

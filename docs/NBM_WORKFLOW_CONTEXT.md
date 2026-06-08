@@ -34,6 +34,15 @@ The patient search route only includes NBM eligibility rows when `includeNbmElig
 
 `app/api/locations/[id]/rx-orders/route.ts` now detects `nbm-eligibility-*` patient ids and resolves the patient from `NBM.dbo.nbm_full_eligibility` before inserting the order into NBM tables.
 
+The provider-facing claims form now follows the same NBM order shape as the management app:
+
+- NBM category is limited to `Initial RX` or `Refill`
+- delivery method is limited to `Local` or `Mail`
+- therapy type is no longer captured in the claims workflow
+- bottle count is always stored as `1`
+- product-derived fields and calculated refill dates are read-only in the form
+- the API calculates refill dates server-side when the browser does not send them
+
 NBM RX orders store these eligibility-related fields when available:
 
 - `eligibility_object_id`
@@ -52,7 +61,7 @@ The order insert continues to create:
 
 ## Product Lookup
 
-The RX form product combobox searches the NBM product master through `/api/products`. Selecting a product autofills SKU, therapy type, product form, copay, and retail cost where available.
+The RX form product combobox searches the NBM product master through `/api/products`. Selecting a product autofills SKU, product form, copay, and retail cost where available.
 
 ## Email Notification Status
 
