@@ -71,3 +71,18 @@ A future email sender should process due `pending` rows, send through an approve
 A manual NBM eligibility test row exists in the shared NBM database for local testing. Search by the test email provided in the project handoff notes. The row is marked with `source_view = 'manual_test'` and `TEST-*` identifiers.
 
 Do not put real patient data, SSNs, or database credentials into this document.
+
+## Required SQL Environment
+
+The NBM patient and product searches use `lib/nbm-sql.ts` and require these environment variables at runtime:
+
+```text
+MSSQL_SERVER=64.27.41.252
+MSSQL_USER=claudeservices
+MSSQL_PASSWORD=<get-from-project-owner>
+NBM_MSSQL_DATABASE=NBM
+```
+
+Set these in `.env.local` for local testing or in the host environment for deployments. Do not commit real database credentials.
+
+If `MSSQL_PASSWORD` is not set, the RX order page prompts the signed-in user for the NBM database password before patient and product lookups run. The entered password is validated server-side and stored in an encrypted HTTP-only browser-session cookie.

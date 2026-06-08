@@ -1,5 +1,6 @@
 import { auth } from "@/lib/auth"
 import { db } from "@/lib/db"
+import { getNbmSqlPasswordFromCookies } from "@/lib/nbm-db-session"
 import { getNbmPool, sql } from "@/lib/nbm-sql"
 import { NextRequest, NextResponse } from "next/server"
 import { devPatients, applyDevFallback } from "@/lib/dev-data"
@@ -38,10 +39,13 @@ export async function GET(req: NextRequest) {
     }
   })()
 
-  const nbmEligibilityPatients = includeNbmEligibility ? await (async () => {
+  let nbmEligibilityPatients = []
+
+  try {
+    nbmEligibilityPatients = includeNbmEligibility ? await (async () => {
     try {
       const search = `%${q}%`
-      const pool = await getNbmPool()
+      const pool = await getNbmPool(await getNbmSqlPasswordFromCookies())
       const result = await pool.request()
         .input("q", sql.NVarChar(255), search)
         .input("hasQuery", sql.Bit, Boolean(q.trim()))
@@ -85,7 +89,17 @@ export async function GET(req: NextRequest) {
       applyDevFallback("nbm eligibility patients api", err)
       return []
     }
-  })() : []
+    })() : []
+  } catch (err) {
+    if (err instanceof Error && err.message === "Missing SQL Server environment variables") {
+      return NextResponse.json(
+        { error: "NBM SQL password required", code: "NBM_SQL_PASSWORD_REQUIRED" },
+        { status: 428 }
+      )
+    }
+
+    throw err
+  }
 
   const patients = [...nbmEligibilityPatients, ...localPatients].slice(0, 50)
 

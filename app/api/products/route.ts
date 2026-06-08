@@ -1,4 +1,5 @@
 import { auth } from "@/lib/auth"
+import { getNbmSqlPasswordFromCookies } from "@/lib/nbm-db-session"
 import { getNbmPool, sql } from "@/lib/nbm-sql"
 import { NextRequest, NextResponse } from "next/server"
 
@@ -11,7 +12,21 @@ export async function GET(req: NextRequest) {
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
 
   const q = (req.nextUrl.searchParams.get("q") || "").trim()
-  const pool = await getNbmPool()
+  let pool
+
+  try {
+    pool = await getNbmPool(await getNbmSqlPasswordFromCookies())
+  } catch (err) {
+    if (err instanceof Error && err.message === "Missing SQL Server environment variables") {
+      return NextResponse.json(
+        { error: "NBM SQL password required", code: "NBM_SQL_PASSWORD_REQUIRED" },
+        { status: 428 }
+      )
+    }
+
+    throw err
+  }
+
   const request = pool.request()
 
   if (q) {
