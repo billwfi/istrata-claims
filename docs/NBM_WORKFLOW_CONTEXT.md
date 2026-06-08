@@ -77,9 +77,9 @@ Do not put real patient data, SSNs, or database credentials into this document.
 The NBM patient and product searches use `lib/nbm-sql.ts` and require these environment variables at runtime:
 
 ```text
-MSSQL_SERVER
-MSSQL_USER
-MSSQL_PASSWORD
+MSSQL_SERVER=64.27.41.252
+MSSQL_USER=claudeservices
+MSSQL_PASSWORD=<get-from-project-owner>
 NBM_MSSQL_DATABASE=NBM
 ```
 
