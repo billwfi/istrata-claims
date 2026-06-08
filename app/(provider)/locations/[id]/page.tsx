@@ -13,7 +13,9 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { ClaimStatusBadge } from "@/components/claims/ClaimStatusBadge"
+import { ClaimsDateFilter } from "@/components/claims/ClaimsDateFilter"
 import { Plus, FileText, PackagePlus } from "lucide-react"
+import { Suspense } from "react"
 import { format } from "date-fns"
 import type { ClaimStatus } from "@/lib/generated/prisma/client"
 import { findDevLocation, applyDevFallback } from "@/lib/dev-data"
@@ -31,14 +33,27 @@ const STATUS_TABS: Array<{ value: string; label: string; status?: ClaimStatus }>
 
 export default async function LocationClaimsPage({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>
+  searchParams: Promise<{ dateFrom?: string; dateTo?: string }>
 }) {
   const { id } = await params
+  const { dateFrom, dateTo } = await searchParams
   const session = await auth()
   if (!session) redirect("/login")
 
   const isAdmin = session.user.role === "ADMIN"
+
+  const dateFilter =
+    dateFrom || dateTo
+      ? {
+          dateOfService: {
+            ...(dateFrom ? { gte: new Date(dateFrom) } : {}),
+            ...(dateTo ? { lte: new Date(dateTo + "T23:59:59") } : {}),
+          },
+        }
+      : {}
 
   const { location, claims } = await (async () => {
     try {
@@ -58,7 +73,7 @@ export default async function LocationClaimsPage({
       }
 
       const claims = await db.claim.findMany({
-        where: { locationId: id },
+        where: { locationId: id, ...dateFilter },
         include: {
           patient: true,
           provider: true,
@@ -106,6 +121,10 @@ export default async function LocationClaimsPage({
           </Link>
         </div>
       </div>
+
+      <Suspense>
+        <ClaimsDateFilter />
+      </Suspense>
 
       <Tabs defaultValue="all">
         <TabsList className="flex-wrap h-auto">
@@ -192,4 +211,3 @@ export default async function LocationClaimsPage({
     </div>
   )
 }
-

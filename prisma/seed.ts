@@ -74,6 +74,36 @@ async function main() {
     },
   })
 
+  const chiropractic = await db.serviceType.upsert({
+    where: { id: "seed-st-chiro" },
+    update: {},
+    create: {
+      id: "seed-st-chiro",
+      name: "Chiropractic",
+      description: "Chiropractic manipulation and spinal adjustment services",
+    },
+  })
+
+  const acupuncture = await db.serviceType.upsert({
+    where: { id: "seed-st-acu" },
+    update: {},
+    create: {
+      id: "seed-st-acu",
+      name: "Acupuncture",
+      description: "Acupuncture and dry needling services",
+    },
+  })
+
+  await db.serviceType.upsert({
+    where: { id: "seed-st-mm" },
+    update: {},
+    create: {
+      id: "seed-st-mm",
+      name: "Medical Massage",
+      description: "Medically prescribed massage therapy services",
+    },
+  })
+
   // Sample CPT codes
   const ptCpts = [
     { code: "97110", description: "Therapeutic exercises" },
