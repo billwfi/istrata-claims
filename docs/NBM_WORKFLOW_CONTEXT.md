@@ -84,3 +84,5 @@ NBM_MSSQL_DATABASE=NBM
 ```
 
 Set these in `.env.local` for local testing or in the host environment for deployments. Do not commit real database credentials.
+
+If `MSSQL_PASSWORD` is not set, the RX order page prompts the signed-in user for the NBM database password before patient and product lookups run. The entered password is validated server-side and stored in an encrypted HTTP-only browser-session cookie.

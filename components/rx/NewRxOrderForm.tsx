@@ -4,11 +4,18 @@ import { useCallback, useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { SearchCombobox } from "@/components/claims/SearchCombobox"
-import { Plus, Send, Trash2 } from "lucide-react"
+import { KeyRound, Plus, Send, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 
 interface NewRxOrderFormProps {
@@ -107,11 +114,26 @@ export function NewRxOrderForm({ locationId }: NewRxOrderFormProps) {
   const [patientLoading, setPatientLoading] = useState(false)
   const [providerLoading, setProviderLoading] = useState(false)
   const [productLoading, setProductLoading] = useState(false)
+  const [nbmPasswordOpen, setNbmPasswordOpen] = useState(false)
+  const [nbmPassword, setNbmPassword] = useState("")
+  const [nbmPasswordSaving, setNbmPasswordSaving] = useState(false)
+  const [nbmPasswordReady, setNbmPasswordReady] = useState(false)
+
+  const openNbmPasswordPrompt = useCallback(() => {
+    setNbmPasswordOpen(true)
+  }, [])
 
   const handlePatientSearch = useCallback((q: string) => {
     setPatientLoading(true)
     fetch(`/api/patients?q=${encodeURIComponent(q)}&includeNbmEligibility=1`)
-      .then((r) => r.json())
+      .then(async (r) => {
+        if (r.status === 428) {
+          openNbmPasswordPrompt()
+          return []
+        }
+        if (!r.ok) throw new Error("Patient search failed")
+        return r.json()
+      })
       .then((data) => {
         setPatients(Array.isArray(data) ? data : [])
         setPatientLoading(false)
@@ -120,7 +142,7 @@ export function NewRxOrderForm({ locationId }: NewRxOrderFormProps) {
         setPatients([])
         setPatientLoading(false)
       })
-  }, [])
+  }, [openNbmPasswordPrompt])
 
   const handleProviderSearch = useCallback((q: string) => {
     setProviderLoading(true)
@@ -135,7 +157,14 @@ export function NewRxOrderForm({ locationId }: NewRxOrderFormProps) {
   const handleProductSearch = useCallback((q: string) => {
     setProductLoading(true)
     fetch(`/api/products?q=${encodeURIComponent(q)}`)
-      .then((r) => r.json())
+      .then(async (r) => {
+        if (r.status === 428) {
+          openNbmPasswordPrompt()
+          return []
+        }
+        if (!r.ok) throw new Error("Product search failed")
+        return r.json()
+      })
       .then((data) => {
         setProducts(Array.isArray(data) ? data : [])
         setProductLoading(false)
@@ -144,13 +173,53 @@ export function NewRxOrderForm({ locationId }: NewRxOrderFormProps) {
         setProducts([])
         setProductLoading(false)
       })
-  }, [])
+  }, [openNbmPasswordPrompt])
 
   useEffect(() => {
     handlePatientSearch("")
     handleProviderSearch("")
     handleProductSearch("")
   }, [handlePatientSearch, handleProviderSearch, handleProductSearch])
+
+  useEffect(() => {
+    fetch("/api/nbm-db-session")
+      .then((r) => r.json())
+      .then((data) => {
+        setNbmPasswordReady(Boolean(data.configured))
+        if (!data.configured) setNbmPasswordOpen(true)
+      })
+      .catch(() => undefined)
+  }, [])
+
+  async function saveNbmPassword() {
+    if (!nbmPassword) {
+      toast.error("Enter the NBM database password")
+      return
+    }
+
+    setNbmPasswordSaving(true)
+    try {
+      const res = await fetch("/api/nbm-db-session", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: nbmPassword }),
+      })
+
+      if (!res.ok) {
+        toast.error(res.status === 401 ? "Unable to connect with that password" : "Unable to save NBM password")
+        return
+      }
+
+      setNbmPassword("")
+      setNbmPasswordReady(true)
+      setNbmPasswordOpen(false)
+      toast.success("NBM database connected")
+      handlePatientSearch("")
+      handleProductSearch("")
+    } finally {
+      setNbmPasswordSaving(false)
+    }
+  }
 
   function selectPatient(value: string | null) {
     setPatientId(value ?? "")
@@ -252,7 +321,56 @@ export function NewRxOrderForm({ locationId }: NewRxOrderFormProps) {
   }
 
   return (
-    <Card>
+    <>
+      <Dialog open={nbmPasswordOpen} onOpenChange={setNbmPasswordOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>NBM database password</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-2">
+              <Label htmlFor="nbm-db-password">Password</Label>
+              <Input
+                id="nbm-db-password"
+                type="password"
+                autoComplete="current-password"
+                value={nbmPassword}
+                onChange={(e) => setNbmPassword(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault()
+                    saveNbmPassword()
+                  }
+                }}
+              />
+            </div>
+            <p className="text-sm text-gray-500">
+              Required for NBM patient eligibility and product master lookups.
+            </p>
+          </div>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setNbmPasswordOpen(false)}>
+              Cancel
+            </Button>
+            <Button type="button" className="gap-2" onClick={saveNbmPassword} disabled={nbmPasswordSaving}>
+              <KeyRound className="h-4 w-4" />
+              {nbmPasswordSaving ? "Connecting..." : "Connect"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {!nbmPasswordReady && (
+        <div className="mb-4 flex items-center justify-between rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          <span>NBM database password required for patient and product lookups.</span>
+          <Button type="button" variant="outline" size="sm" className="gap-2" onClick={openNbmPasswordPrompt}>
+            <KeyRound className="h-4 w-4" />
+            Connect
+          </Button>
+        </div>
+      )}
+
+      <Card>
       <CardContent className="p-6 space-y-8">
         <div className="grid gap-6 md:grid-cols-2">
           <div className="space-y-2">
@@ -449,6 +567,7 @@ export function NewRxOrderForm({ locationId }: NewRxOrderFormProps) {
           </Button>
         </div>
       </CardContent>
-    </Card>
+      </Card>
+    </>
   )
 }

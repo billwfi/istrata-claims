@@ -1,5 +1,6 @@
 import { auth } from "@/lib/auth"
 import { db } from "@/lib/db"
+import { getNbmSqlPasswordFromCookies } from "@/lib/nbm-db-session"
 import { getNbmPool, sql } from "@/lib/nbm-sql"
 import { NextRequest, NextResponse } from "next/server"
 import { devPatients, devProviders, findDevLocation, applyDevFallback } from "@/lib/dev-data"
@@ -174,7 +175,21 @@ export async function POST(
     if (!access) return NextResponse.json({ error: "Forbidden" }, { status: 403 })
   }
 
-  const pool = await getNbmPool()
+  let pool
+
+  try {
+    pool = await getNbmPool(await getNbmSqlPasswordFromCookies())
+  } catch (err) {
+    if (err instanceof Error && err.message === "Missing SQL Server environment variables") {
+      return NextResponse.json(
+        { error: "NBM SQL password required", code: "NBM_SQL_PASSWORD_REQUIRED" },
+        { status: 428 }
+      )
+    }
+
+    throw err
+  }
+
   const nbmEligibilityPatient = getNbmEligibilityId(body.patientId)
 
   const [location, patient, provider] = await (async () => {
