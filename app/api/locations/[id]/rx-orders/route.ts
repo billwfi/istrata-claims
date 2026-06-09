@@ -15,6 +15,8 @@ interface RxItemInput {
   automaticRefill?: boolean
   copayAmount?: number
   retailCost?: number
+  patientPayAmount?: number
+  patientPayBasis?: string
   nextFillDate?: string
   processRefillDate?: string
 }
@@ -111,6 +113,11 @@ function itemUtilizationAmount(item: RxItemInput) {
   return retailCost * getPositiveInt((item as RxItemInput & { numberOfBottles?: number }).numberOfBottles, 1)
 }
 
+function productCopayAmount(item: RxItemInput, program: NbmProgramRule) {
+  if (!program.copayEnabled) return 0
+  return asNumber(item.copayAmount) ?? 0
+}
+
 interface NbmProgramRule {
   ruleId: string | null
   sourceSystem: string
@@ -145,6 +152,63 @@ interface BenefitEvaluation {
   planYearStart: Date
   planYearEnd: Date
   shouldNotifyMax: boolean
+}
+
+interface PatientPricing {
+  patientPayAmount: number
+  patientPayBasis: string
+  pricingMessage: string
+}
+
+function retailRequiredForBenefit(benefit: BenefitEvaluation) {
+  return benefit.annualMaxAmount != null
+    && (
+      benefit.utilizationBefore >= benefit.annualMaxAmount
+      || benefit.utilizationAfter > benefit.annualMaxAmount
+      || benefit.status === "retail_required"
+    )
+}
+
+function itemPatientPricing(item: RxItemInput, benefit: BenefitEvaluation, program: NbmProgramRule): PatientPricing {
+  const retailAmount = itemUtilizationAmount(item)
+  if (retailRequiredForBenefit(benefit)) {
+    return {
+      patientPayAmount: retailAmount,
+      patientPayBasis: "retail",
+      pricingMessage: `Annual NBM allocation is exhausted or exceeded. Collect retail (${formatMoney(retailAmount)}) instead of copay.`,
+    }
+  }
+
+  if (!program.copayEnabled) {
+    return {
+      patientPayAmount: 0,
+      patientPayBasis: "no_copay",
+      pricingMessage: "Copay is disabled for this NBM program.",
+    }
+  }
+
+  const copayAmount = productCopayAmount(item, program)
+  return {
+    patientPayAmount: copayAmount,
+    patientPayBasis: "copay",
+    pricingMessage: `Collect product copay (${formatMoney(copayAmount)}).`,
+  }
+}
+
+async function ensureNbmPricingSchema(pool: sql.ConnectionPool) {
+  await pool.request().query(`
+    IF COL_LENGTH('dbo.nbm_rx_order_items', 'patient_pay_amount') IS NULL
+      ALTER TABLE dbo.nbm_rx_order_items ADD patient_pay_amount DECIMAL(12,2) NULL;
+    IF COL_LENGTH('dbo.nbm_rx_order_items', 'patient_pay_basis') IS NULL
+      ALTER TABLE dbo.nbm_rx_order_items ADD patient_pay_basis NVARCHAR(40) NULL;
+    IF COL_LENGTH('dbo.nbm_rx_order_items', 'pricing_message') IS NULL
+      ALTER TABLE dbo.nbm_rx_order_items ADD pricing_message NVARCHAR(500) NULL;
+
+    IF COL_LENGTH('dbo.nbm_refill_tasks', 'payment_basis') IS NULL
+      ALTER TABLE dbo.nbm_refill_tasks ADD payment_basis NVARCHAR(40) NULL;
+    IF COL_LENGTH('dbo.nbm_refill_tasks', 'payment_message') IS NULL
+      ALTER TABLE dbo.nbm_refill_tasks ADD payment_message NVARCHAR(500) NULL;
+  `)
 }
 
 function planYearWindow(referenceDate: Date, rule: NbmProgramRule) {
@@ -262,15 +326,12 @@ async function evaluateBenefit(pool: sql.ConnectionPool, patient: ResolvedPatien
   } else if (missingRetail) {
     status = "rejected_missing_retail_cost"
     message = "Retail cost is required to enforce the configured annual NBM maximum."
-  } else if (after > annualMax && program.enforcementMode !== "flag_only") {
-    status = "rejected_exceeds_annual_max"
-    message = `Order would exceed the annual NBM maximum (${formatMoney(annualMax)}). Current used: ${formatMoney(before)}; order retail: ${formatMoney(orderUtilization)}.`
-  } else if (after > annualMax) {
-    status = "flagged_exceeds_annual_max"
-    message = `Order exceeds the annual NBM maximum (${formatMoney(annualMax)}) and was flagged for review.`
+  } else if (before >= annualMax || after > annualMax) {
+    status = "retail_required"
+    message = `Annual NBM allocation is exhausted or exceeded (${formatMoney(annualMax)} max). Current used: ${formatMoney(before)}; order retail: ${formatMoney(orderUtilization)}. Patient should pay retail instead of copay.`
   } else if (threshold != null && after >= threshold) {
     status = "max_reached"
-    message = `Patient has reached the configured NBM annual threshold (${formatMoney(annualMax)}).`
+    message = `Patient reaches the configured NBM annual threshold (${formatMoney(annualMax)}) with this fill. Future fills should be retail instead of copay.`
   }
 
   return {
@@ -283,7 +344,7 @@ async function evaluateBenefit(pool: sql.ConnectionPool, patient: ResolvedPatien
     annualMaxAmount: annualMax,
     planYearStart: planYear.start,
     planYearEnd: planYear.end,
-    shouldNotifyMax: status === "max_reached" || status === "flagged_exceeds_annual_max",
+    shouldNotifyMax: status === "max_reached" || status === "retail_required" || status === "flagged_exceeds_annual_max",
   }
 }
 
@@ -321,7 +382,12 @@ async function insertUtilizationEvent(
     .input("retailAmount", sql.Decimal(12, 2), asNumber(args.item.retailCost))
     .input("copayAmount", sql.Decimal(12, 2), asNumber(args.item.copayAmount))
     .input("sourceStatus", sql.NVarChar(40), args.benefit.status)
-    .input("payload", sql.NVarChar(sql.MAX), JSON.stringify({ productName: args.item.productName || null, productSku: args.item.productSku || null }))
+    .input("payload", sql.NVarChar(sql.MAX), JSON.stringify({
+      productName: args.item.productName || null,
+      productSku: args.item.productSku || null,
+      patientPayAmount: args.item.patientPayAmount ?? null,
+      patientPayBasis: args.item.patientPayBasis ?? null,
+    }))
     .input("createdBy", sql.NVarChar(100), args.createdBy)
     .query(`
       INSERT INTO dbo.nbm_utilization_events (
@@ -629,6 +695,7 @@ export async function POST(
 
   try {
     pool = await getNbmPool(await getNbmSqlPasswordFromCookies())
+    await ensureNbmPricingSchema(pool)
   } catch (err) {
     if (err instanceof Error && err.message === "Missing SQL Server environment variables") {
       return NextResponse.json(
@@ -775,9 +842,12 @@ export async function POST(
       const normalizedItem: RxItemInput = {
         ...item,
         automaticRefill: program.refillsAllowed && item.automaticRefill !== false,
-        copayAmount: program.copayEnabled ? asNumber(item.copayAmount) ?? undefined : 0,
+        copayAmount: productCopayAmount(item, program),
         retailCost: asNumber(item.retailCost) ?? undefined,
       }
+      const pricing = itemPatientPricing(normalizedItem, benefit, program)
+      normalizedItem.patientPayAmount = pricing.patientPayAmount
+      normalizedItem.patientPayBasis = pricing.patientPayBasis
 
       const itemResult = await tx.request()
         .input("orderId", sql.UniqueIdentifier, orderId)
@@ -793,6 +863,9 @@ export async function POST(
         .input("automaticRefill", sql.Bit, Boolean(normalizedItem.automaticRefill))
         .input("copayAmount", sql.Decimal(12, 2), asNumber(normalizedItem.copayAmount))
         .input("retailCost", sql.Decimal(12, 2), asNumber(normalizedItem.retailCost))
+        .input("patientPayAmount", sql.Decimal(12, 2), pricing.patientPayAmount)
+        .input("patientPayBasis", sql.NVarChar(40), pricing.patientPayBasis)
+        .input("pricingMessage", sql.NVarChar(500), pricing.pricingMessage)
         .input("nextFillDate", sql.Date, nextFillDate)
         .input("processRefillDate", sql.Date, processRefillDate)
         .input("sixMonthDate", sql.Date, sixMonthDate)
@@ -803,7 +876,8 @@ export async function POST(
           INSERT INTO dbo.nbm_rx_order_items (
             order_id, line_number, product_object_id, product_sku, product_name, therapy_type, dosage,
             number_of_bottles, refill_frequency_days, refill_duration_months, automatic_refill,
-            copay_amount, retail_cost, next_fill_date, process_refill_date,
+            copay_amount, retail_cost, patient_pay_amount, patient_pay_basis, pricing_message,
+            next_fill_date, process_refill_date,
             six_month_process_refill_date, nine_month_process_refill_date,
             utilization_amount, benefit_action
           )
@@ -811,7 +885,8 @@ export async function POST(
           VALUES (
             @orderId, @lineNumber, @productId, @productSku, @productName, @therapyType, @dosage,
             @numberOfBottles, @refillFrequencyDays, @refillDurationMonths, @automaticRefill,
-            @copayAmount, @retailCost, @nextFillDate, @processRefillDate,
+            @copayAmount, @retailCost, @patientPayAmount, @patientPayBasis, @pricingMessage,
+            @nextFillDate, @processRefillDate,
             @sixMonthDate, @nineMonthDate, @utilizationAmount, @benefitAction
           )
         `)
