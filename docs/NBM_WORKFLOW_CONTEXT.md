@@ -36,11 +36,12 @@ The patient search route only includes NBM eligibility rows when `includeNbmElig
 
 The provider-facing claims form now follows the same NBM order shape as the management app:
 
-- NBM category is limited to `Initial RX` or `Refill`
+- NBM category is fixed to `Initial RX`
 - delivery method is limited to `Local` or `Mail`
 - therapy type is no longer captured in the claims workflow
 - bottle count is always stored as `1`
-- product-derived fields and calculated refill dates are read-only in the form
+- product-derived fields are read-only in the form
+- refill-specific fields and calculated refill dates are hidden from providers
 - the API calculates refill dates server-side when the browser does not send them
 
 NBM RX orders store these eligibility-related fields when available:
@@ -59,13 +60,21 @@ The order insert continues to create:
 - `dbo.nbm_workflow_events`
 - `dbo.nbm_email_queue`
 
+Downstream management-app refill handling now adds:
+
+- `dbo.nbm_refill_tasks`
+- `dbo.nbm_payment_requests`
+- `dbo.nbm_payment_events`
+
+The claims app should continue submitting provider-facing `Initial RX` orders only. Refill task creation, hosted USIO payment-link generation, automatic refill payment email queueing, SMTP sending, and future USIO API/webhook reconciliation are owned by the management app.
+
 ## Product Lookup
 
 The RX form product combobox searches the NBM product master through `/api/products`. Selecting a product autofills SKU, product form, copay, and retail cost where available.
 
 ## Email Notification Status
 
-The current implementation queues email notifications in `dbo.nbm_email_queue`; it does not send real email yet.
+The claims app queues initial order notification records in `dbo.nbm_email_queue`; it does not send real email directly.
 
 Current seeded rules include:
 
@@ -73,7 +82,7 @@ Current seeded rules include:
 - `three_day_refill_followup`
 - `six_month_initial`
 
-A future email sender should process due `pending` rows, send through an approved SMTP/API provider, then mark rows `sent` or `failed` and write workflow events.
+The management app now contains staged SMTP-ready refill payment email automation. Real SMTP sending remains disabled until SMTP environment variables are configured. Refill payment emails currently use the hosted USIO prefill URL; future USIO API/webhook payment confirmation should be reconciled in the management app.
 
 ## Test Row
 

@@ -63,14 +63,10 @@ interface RxItem {
   productSku: string
   productFormType: string
   dosage: string
-  refillFrequencyDays: string
-  refillDurationMonths: string
-  automaticRefill: boolean
   copayAmount: string
   retailCost: string
 }
 
-const orderCategories = ["Initial RX", "Refill"] as const
 const deliveryMethods = ["Local", "Mail"] as const
 
 const emptyItem = (): RxItem => ({
@@ -79,42 +75,9 @@ const emptyItem = (): RxItem => ({
   productSku: "",
   productFormType: "",
   dosage: "",
-  refillFrequencyDays: "30",
-  refillDurationMonths: "",
-  automaticRefill: true,
   copayAmount: "",
   retailCost: "",
 })
-
-function toDateInput(date: Date) {
-  const yyyy = date.getFullYear()
-  const mm = String(date.getMonth() + 1).padStart(2, "0")
-  const dd = String(date.getDate()).padStart(2, "0")
-  return `${yyyy}-${mm}-${dd}`
-}
-
-function addDays(date: Date, days: number) {
-  const next = new Date(date)
-  next.setDate(next.getDate() + days)
-  return next
-}
-
-function addMonths(date: Date, months: number) {
-  const next = new Date(date)
-  next.setMonth(next.getMonth() + months)
-  return next
-}
-
-function calculatedDates(item: RxItem) {
-  const frequencyDays = Number(item.refillFrequencyDays || 30)
-  const processRefillDate = addDays(new Date(), Number.isFinite(frequencyDays) && frequencyDays > 0 ? frequencyDays : 30)
-  return {
-    nextFillDate: toDateInput(processRefillDate),
-    processRefillDate: toDateInput(processRefillDate),
-    sixMonthProcessRefillDate: toDateInput(addMonths(processRefillDate, 6)),
-    nineMonthProcessRefillDate: toDateInput(addMonths(processRefillDate, 9)),
-  }
-}
 
 export function NewRxOrderForm({ locationId }: NewRxOrderFormProps) {
   const router = useRouter()
@@ -129,7 +92,6 @@ export function NewRxOrderForm({ locationId }: NewRxOrderFormProps) {
   const [shippingCity, setShippingCity] = useState("")
   const [shippingState, setShippingState] = useState("")
   const [shippingZip, setShippingZip] = useState("")
-  const [orderCategory, setOrderCategory] = useState<(typeof orderCategories)[number]>("Initial RX")
   const [deliveryMethod, setDeliveryMethod] = useState<(typeof deliveryMethods)[number]>("Local")
   const [notes, setNotes] = useState("")
   const [items, setItems] = useState<RxItem[]>([emptyItem()])
@@ -305,7 +267,7 @@ export function NewRxOrderForm({ locationId }: NewRxOrderFormProps) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          orderCategory,
+          orderCategory: "Initial RX",
           patientId,
           providerId,
           patientEmail: patientEmail.trim() || null,
@@ -317,24 +279,18 @@ export function NewRxOrderForm({ locationId }: NewRxOrderFormProps) {
           shippingZip: shippingZip.trim() || null,
           deliveryMethod,
           notes: notes.trim() || null,
-          items: validItems.map((item) => {
-            const dates = calculatedDates(item)
-            return {
-              productName: item.productName.trim(),
-              productId: item.productId || null,
-              productSku: item.productSku.trim() || null,
-              productFormType: item.productFormType.trim() || null,
-              dosage: item.dosage.trim() || null,
-              numberOfBottles: 1,
-              refillFrequencyDays: item.refillFrequencyDays ? Number(item.refillFrequencyDays) : 30,
-              refillDurationMonths: item.refillDurationMonths ? Number(item.refillDurationMonths) : null,
-              automaticRefill: item.automaticRefill,
-              copayAmount: item.copayAmount ? Number(item.copayAmount) : null,
-              retailCost: item.retailCost ? Number(item.retailCost) : null,
-              nextFillDate: dates.nextFillDate,
-              processRefillDate: dates.processRefillDate,
-            }
-          }),
+          items: validItems.map((item) => ({
+            productName: item.productName.trim(),
+            productId: item.productId || null,
+            productSku: item.productSku.trim() || null,
+            productFormType: item.productFormType.trim() || null,
+            dosage: item.dosage.trim() || null,
+            numberOfBottles: 1,
+            refillFrequencyDays: 30,
+            automaticRefill: true,
+            copayAmount: item.copayAmount ? Number(item.copayAmount) : null,
+            retailCost: item.retailCost ? Number(item.retailCost) : null,
+          })),
         }),
       })
 
@@ -403,20 +359,6 @@ export function NewRxOrderForm({ locationId }: NewRxOrderFormProps) {
       <Card>
       <CardContent className="p-6 space-y-8">
         <div className="grid gap-6 md:grid-cols-2">
-          <div className="space-y-2">
-            <Label htmlFor="order-category">NBM category</Label>
-            <select
-              id="order-category"
-              className="h-8 w-full rounded-lg border border-input bg-transparent px-2.5 py-1 text-sm"
-              value={orderCategory}
-              onChange={(e) => setOrderCategory(e.target.value as (typeof orderCategories)[number])}
-            >
-              {orderCategories.map((category) => (
-                <option key={category} value={category}>{category}</option>
-              ))}
-            </select>
-          </div>
-
           <div className="space-y-2">
             <Label htmlFor="delivery-method">Delivery method</Label>
             <select
@@ -519,10 +461,7 @@ export function NewRxOrderForm({ locationId }: NewRxOrderFormProps) {
           </div>
 
           <div className="space-y-4">
-            {items.map((item, index) => {
-              const dates = calculatedDates(item)
-
-              return (
+            {items.map((item, index) => (
               <div key={index} className="rounded-lg border bg-white p-4 space-y-4">
                 <div className="flex items-center justify-between">
                   <h3 className="font-medium text-gray-900">Product {index + 1}</h3>
@@ -570,14 +509,6 @@ export function NewRxOrderForm({ locationId }: NewRxOrderFormProps) {
                     </div>
                   </div>
                   <div className="space-y-2">
-                    <Label>Refill frequency days</Label>
-                    <Input type="number" min="0" value={item.refillFrequencyDays} onChange={(e) => updateItem(index, { refillFrequencyDays: e.target.value })} />
-                  </div>
-                  <div className="space-y-2">
-                    <Label>Refill duration months</Label>
-                    <Input type="number" min="0" value={item.refillDurationMonths} onChange={(e) => updateItem(index, { refillDurationMonths: e.target.value })} />
-                  </div>
-                  <div className="space-y-2">
                     <Label>Copay</Label>
                     <Input type="number" min="0" step="0.01" value={item.copayAmount} readOnly />
                   </div>
@@ -585,34 +516,9 @@ export function NewRxOrderForm({ locationId }: NewRxOrderFormProps) {
                     <Label>Retail cost</Label>
                     <Input type="number" min="0" step="0.01" value={item.retailCost} readOnly />
                   </div>
-                  <div className="space-y-2">
-                    <Label>Next fill date</Label>
-                    <Input type="date" value={dates.nextFillDate} readOnly />
-                  </div>
-                  <div className="space-y-2">
-                    <Label>Process refill date</Label>
-                    <Input type="date" value={dates.processRefillDate} readOnly />
-                  </div>
-                  <div className="space-y-2">
-                    <Label>Six month process date</Label>
-                    <Input type="date" value={dates.sixMonthProcessRefillDate} readOnly />
-                  </div>
-                  <div className="space-y-2">
-                    <Label>Nine month process date</Label>
-                    <Input type="date" value={dates.nineMonthProcessRefillDate} readOnly />
-                  </div>
-                  <label className="flex items-center gap-2 text-sm text-gray-700 pt-7">
-                    <input
-                      type="checkbox"
-                      checked={item.automaticRefill}
-                      onChange={(e) => updateItem(index, { automaticRefill: e.target.checked })}
-                    />
-                    Automatic refill
-                  </label>
                 </div>
               </div>
-              )
-            })}
+            ))}
           </div>
         </div>
 

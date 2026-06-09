@@ -39,6 +39,8 @@ interface ResolvedPatient {
   zip?: string | null
   groupId?: string | null
   groupName?: string | null
+  supplementAllowance?: number | null
+  supplementDiscount?: number | null
 }
 
 function getNbmEligibilityId(value: unknown) {
@@ -89,6 +91,422 @@ function renderTemplate(template: string | null, values: Record<string, string>)
   return (template || "").replace(/\{\{(\w+)\}\}/g, (_, key) => values[key] || "")
 }
 
+function toSqlDate(date: Date | null) {
+  return date ? date.toISOString().slice(0, 10) : null
+}
+
+function formatMoney(value: number | null) {
+  if (value == null) return "unconfigured"
+  return `$${Number(value).toFixed(2)}`
+}
+
+function getPositiveInt(value: unknown, fallback = 1) {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback
+}
+
+function itemUtilizationAmount(item: RxItemInput) {
+  const retailCost = asNumber(item.retailCost)
+  if (retailCost == null) return 0
+  return retailCost * getPositiveInt((item as RxItemInput & { numberOfBottles?: number }).numberOfBottles, 1)
+}
+
+interface NbmProgramRule {
+  ruleId: string | null
+  sourceSystem: string
+  sourceObjectId: string | null
+  programType: string
+  programName: string
+  groupId: string | null
+  groupName: string | null
+  planYearStartMonth: number
+  planYearStartDay: number
+  annualMaxAmount: number | null
+  annualMaxMode: string
+  enforcementMode: string
+  copayEnabled: boolean
+  refillsAllowed: boolean
+  pepmRate: number | null
+  billingFrequency: string | null
+  notificationThresholdPercent: number
+  patientNotificationEnabled: boolean
+  locationNotificationEnabled: boolean
+  usedPatientAllowanceFallback: boolean
+}
+
+interface BenefitEvaluation {
+  status: string
+  message: string
+  orderUtilization: number
+  utilizationBefore: number
+  utilizationAfter: number
+  remainingAfter: number | null
+  annualMaxAmount: number | null
+  planYearStart: Date
+  planYearEnd: Date
+  shouldNotifyMax: boolean
+}
+
+function planYearWindow(referenceDate: Date, rule: NbmProgramRule) {
+  const month = Math.min(Math.max(Number(rule.planYearStartMonth || 1), 1), 12) - 1
+  const day = Math.min(Math.max(Number(rule.planYearStartDay || 1), 1), 31)
+  let start = new Date(referenceDate.getFullYear(), month, day)
+  if (referenceDate < start) start = new Date(referenceDate.getFullYear() - 1, month, day)
+
+  const nextStart = new Date(start)
+  nextStart.setFullYear(start.getFullYear() + 1)
+  const end = addDays(nextStart, -1)
+
+  return { start, end }
+}
+
+function mapProgramRule(row: Record<string, unknown> | undefined, patient: ResolvedPatient): NbmProgramRule {
+  const patientAnnualMax = asNumber(patient.supplementAllowance)
+  const ruleAnnualMax = row?.annual_max_amount == null ? null : Number(row.annual_max_amount)
+  const annualMaxAmount = ruleAnnualMax ?? patientAnnualMax
+
+  return {
+    ruleId: String(row?.id || "") || null,
+    sourceSystem: String(row?.source_system || "runtime"),
+    sourceObjectId: row?.source_object_id ? String(row.source_object_id) : null,
+    programType: String(row?.program_type || "PEPM_NBM"),
+    programName: String(row?.program_name || "Unconfigured PEPM NBM"),
+    groupId: row?.group_id ? String(row.group_id) : patient.groupId || null,
+    groupName: row?.group_name ? String(row.group_name) : patient.groupName || null,
+    planYearStartMonth: Number(row?.plan_year_start_month || 1),
+    planYearStartDay: Number(row?.plan_year_start_day || 1),
+    annualMaxAmount,
+    annualMaxMode: String(row?.annual_max_mode || "retail_dollars"),
+    enforcementMode: String(row?.enforcement_mode || "prevent_exceeded"),
+    copayEnabled: row?.copay_enabled == null ? true : Boolean(row.copay_enabled),
+    refillsAllowed: row?.refills_allowed == null ? true : Boolean(row.refills_allowed),
+    pepmRate: row?.pepm_rate == null ? null : Number(row.pepm_rate),
+    billingFrequency: row?.billing_frequency ? String(row.billing_frequency) : null,
+    notificationThresholdPercent: Number(row?.notification_threshold_percent || 100),
+    patientNotificationEnabled: row?.patient_notification_enabled == null ? true : Boolean(row.patient_notification_enabled),
+    locationNotificationEnabled: row?.location_notification_enabled == null ? true : Boolean(row.location_notification_enabled),
+    usedPatientAllowanceFallback: ruleAnnualMax == null && patientAnnualMax != null,
+  }
+}
+
+async function resolveProgramRule(pool: sql.ConnectionPool, patient: ResolvedPatient, locationId: string, body: Record<string, unknown>, submittedAt: Date) {
+  const programType = String(body.programType || body.program_type || "PEPM_NBM").trim() || "PEPM_NBM"
+  const result = await pool.request()
+    .input("programType", sql.NVarChar(40), programType)
+    .input("effectiveOn", sql.Date, submittedAt)
+    .input("groupId", sql.NVarChar(100), patient.groupId || null)
+    .input("locationId", sql.NVarChar(100), locationId || null)
+    .query(`
+      SELECT TOP 1 *
+      FROM dbo.nbm_program_rules r
+      WHERE r.active = 1
+        AND r.program_type = @programType
+        AND (r.effective_date IS NULL OR r.effective_date <= @effectiveOn)
+        AND (r.end_date IS NULL OR r.end_date >= @effectiveOn)
+        AND (
+          (r.location_id IS NOT NULL AND r.location_id = @locationId)
+          OR (r.group_id IS NOT NULL AND r.group_id = @groupId)
+          OR (r.location_id IS NULL AND r.group_id IS NULL)
+        )
+      ORDER BY
+        CASE WHEN r.location_id IS NOT NULL AND r.location_id = @locationId THEN 0 ELSE 1 END,
+        CASE WHEN r.group_id IS NOT NULL AND r.group_id = @groupId THEN 0 ELSE 1 END,
+        CASE WHEN r.source_system = 'system' THEN 1 ELSE 0 END,
+        r.effective_date DESC,
+        r.created_at DESC
+    `)
+
+  return mapProgramRule(result.recordset[0], patient)
+}
+
+async function evaluateBenefit(pool: sql.ConnectionPool, patient: ResolvedPatient, items: RxItemInput[], program: NbmProgramRule, submittedAt: Date): Promise<BenefitEvaluation> {
+  const planYear = planYearWindow(submittedAt, program)
+  const missingRetail = items.some((item) => asNumber(item.retailCost) == null)
+  const orderUtilization = items.reduce((sum, item) => sum + itemUtilizationAmount(item), 0)
+
+  const existing = await pool.request()
+    .input("programType", sql.NVarChar(40), program.programType)
+    .input("planYearStart", sql.Date, planYear.start)
+    .input("planYearEnd", sql.Date, planYear.end)
+    .input("groupId", sql.NVarChar(100), patient.groupId || null)
+    .input("eligibilityObjectId", sql.NVarChar(100), patient.eligibilityObjectId || null)
+    .input("patientMemberId", sql.NVarChar(100), patient.memberId || null)
+    .input("patientEmployeeId", sql.NVarChar(100), patient.employeeId || null)
+    .query(`
+      SELECT COALESCE(SUM(utilization_amount), 0) AS annual_utilization
+      FROM dbo.nbm_utilization_events
+      WHERE voided_at IS NULL
+        AND program_type = @programType
+        AND plan_year_start = @planYearStart
+        AND plan_year_end = @planYearEnd
+        AND COALESCE(group_id, '') = COALESCE(@groupId, '')
+        AND (
+          (@eligibilityObjectId IS NOT NULL AND eligibility_object_id = @eligibilityObjectId)
+          OR (@patientMemberId IS NOT NULL AND patient_member_id = @patientMemberId)
+          OR (@patientEmployeeId IS NOT NULL AND patient_employee_id = @patientEmployeeId)
+        )
+    `)
+
+  const annualMax = program.annualMaxAmount == null ? null : Number(program.annualMaxAmount)
+  const before = Number(existing.recordset[0]?.annual_utilization || 0)
+  const after = before + orderUtilization
+  const remaining = annualMax == null ? null : annualMax - after
+  const threshold = annualMax == null ? null : annualMax * (Number(program.notificationThresholdPercent || 100) / 100)
+
+  let status = "approved"
+  let message = "Benefit validation passed."
+
+  if (annualMax == null) {
+    status = "unconfigured"
+    message = "No annual max is configured for this patient program; order accepted and flagged for configuration."
+  } else if (missingRetail) {
+    status = "rejected_missing_retail_cost"
+    message = "Retail cost is required to enforce the configured annual NBM maximum."
+  } else if (after > annualMax && program.enforcementMode !== "flag_only") {
+    status = "rejected_exceeds_annual_max"
+    message = `Order would exceed the annual NBM maximum (${formatMoney(annualMax)}). Current used: ${formatMoney(before)}; order retail: ${formatMoney(orderUtilization)}.`
+  } else if (after > annualMax) {
+    status = "flagged_exceeds_annual_max"
+    message = `Order exceeds the annual NBM maximum (${formatMoney(annualMax)}) and was flagged for review.`
+  } else if (threshold != null && after >= threshold) {
+    status = "max_reached"
+    message = `Patient has reached the configured NBM annual threshold (${formatMoney(annualMax)}).`
+  }
+
+  return {
+    status,
+    message,
+    orderUtilization,
+    utilizationBefore: before,
+    utilizationAfter: after,
+    remainingAfter: remaining,
+    annualMaxAmount: annualMax,
+    planYearStart: planYear.start,
+    planYearEnd: planYear.end,
+    shouldNotifyMax: status === "max_reached" || status === "flagged_exceeds_annual_max",
+  }
+}
+
+async function insertUtilizationEvent(
+  tx: sql.Transaction,
+  args: {
+    orderId: string
+    itemId: string
+    item: RxItemInput
+    patient: ResolvedPatient
+    program: NbmProgramRule
+    benefit: BenefitEvaluation
+    createdBy: string
+  }
+) {
+  const utilizationAmount = itemUtilizationAmount(args.item)
+  if (utilizationAmount <= 0) return
+
+  await tx.request()
+    .input("orderId", sql.UniqueIdentifier, args.orderId)
+    .input("itemId", sql.UniqueIdentifier, args.itemId)
+    .input("programRuleId", sql.UniqueIdentifier, args.program.ruleId)
+    .input("eligibilityObjectId", sql.NVarChar(100), args.patient.eligibilityObjectId || null)
+    .input("patientEmployeeId", sql.NVarChar(100), args.patient.employeeId || null)
+    .input("patientMemberId", sql.NVarChar(100), args.patient.memberId || null)
+    .input("patientFirstName", sql.NVarChar(100), args.patient.firstName || null)
+    .input("patientLastName", sql.NVarChar(100), args.patient.lastName || null)
+    .input("groupId", sql.NVarChar(100), args.patient.groupId || null)
+    .input("groupName", sql.NVarChar(200), args.patient.groupName || null)
+    .input("programType", sql.NVarChar(40), args.program.programType)
+    .input("programName", sql.NVarChar(200), args.program.programName)
+    .input("planYearStart", sql.Date, args.benefit.planYearStart)
+    .input("planYearEnd", sql.Date, args.benefit.planYearEnd)
+    .input("utilizationAmount", sql.Decimal(12, 2), utilizationAmount)
+    .input("retailAmount", sql.Decimal(12, 2), asNumber(args.item.retailCost))
+    .input("copayAmount", sql.Decimal(12, 2), asNumber(args.item.copayAmount))
+    .input("sourceStatus", sql.NVarChar(40), args.benefit.status)
+    .input("payload", sql.NVarChar(sql.MAX), JSON.stringify({ productName: args.item.productName || null, productSku: args.item.productSku || null }))
+    .input("createdBy", sql.NVarChar(100), args.createdBy)
+    .query(`
+      INSERT INTO dbo.nbm_utilization_events (
+        order_id, item_id, program_rule_id,
+        eligibility_object_id, patient_employee_id, patient_member_id,
+        patient_first_name, patient_last_name, group_id, group_name,
+        program_type, program_name, plan_year_start, plan_year_end,
+        event_type, utilization_amount, retail_amount, copay_amount, source_status,
+        payload_json, created_by
+      )
+      VALUES (
+        @orderId, @itemId, @programRuleId,
+        @eligibilityObjectId, @patientEmployeeId, @patientMemberId,
+        @patientFirstName, @patientLastName, @groupId, @groupName,
+        @programType, @programName, @planYearStart, @planYearEnd,
+        'order_submitted', @utilizationAmount, @retailAmount, @copayAmount, @sourceStatus,
+        @payload, @createdBy
+      )
+    `)
+}
+
+async function queueImmediateEmail(
+  tx: sql.Transaction,
+  args: {
+    orderId: string
+    ruleKey: string
+    recipientEmail: string | null
+    recipientName: string | null
+    values: Record<string, string>
+  }
+) {
+  if (!args.recipientEmail) return null
+
+  const rule = await tx.request()
+    .input("ruleKey", sql.NVarChar(80), args.ruleKey)
+    .query(`
+      SELECT TOP 1 subject_template, body_template
+      FROM dbo.nbm_email_rules
+      WHERE active = 1 AND rule_key = @ruleKey
+    `)
+  const template = rule.recordset[0]
+  if (!template) return null
+
+  const queued = await tx.request()
+    .input("orderId", sql.UniqueIdentifier, args.orderId)
+    .input("ruleKey", sql.NVarChar(80), args.ruleKey)
+    .input("recipientEmail", sql.NVarChar(255), args.recipientEmail)
+    .input("recipientName", sql.NVarChar(200), args.recipientName)
+    .input("subject", sql.NVarChar(255), renderTemplate(template.subject_template, args.values))
+    .input("body", sql.NVarChar(sql.MAX), renderTemplate(template.body_template, args.values))
+    .query(`
+      INSERT INTO dbo.nbm_email_queue (
+        order_id, rule_key, recipient_email, recipient_name, subject, body, scheduled_for
+      )
+      OUTPUT inserted.id
+      VALUES (@orderId, @ruleKey, @recipientEmail, @recipientName, @subject, @body, SYSUTCDATETIME())
+    `)
+
+  return queued.recordset[0]?.id as number | null
+}
+
+async function insertBenefitNotification(
+  tx: sql.Transaction,
+  args: {
+    orderId: string
+    patient: ResolvedPatient
+    program: NbmProgramRule
+    benefit: BenefitEvaluation
+    recipientType: string
+    recipientEmail: string | null
+    recipientName: string | null
+    emailQueueId: number | null
+    createdBy: string
+  }
+) {
+  const patientName = `${args.patient.firstName || ""} ${args.patient.lastName || ""}`.trim()
+
+  await tx.request()
+    .input("orderId", sql.UniqueIdentifier, args.orderId)
+    .input("programRuleId", sql.UniqueIdentifier, args.program.ruleId)
+    .input("eligibilityObjectId", sql.NVarChar(100), args.patient.eligibilityObjectId || null)
+    .input("patientMemberId", sql.NVarChar(100), args.patient.memberId || null)
+    .input("patientName", sql.NVarChar(220), patientName || null)
+    .input("groupId", sql.NVarChar(100), args.patient.groupId || null)
+    .input("groupName", sql.NVarChar(200), args.patient.groupName || null)
+    .input("programType", sql.NVarChar(40), args.program.programType)
+    .input("programName", sql.NVarChar(200), args.program.programName)
+    .input("planYearStart", sql.Date, args.benefit.planYearStart)
+    .input("planYearEnd", sql.Date, args.benefit.planYearEnd)
+    .input("thresholdPercent", sql.Decimal(5, 2), args.program.notificationThresholdPercent || 100)
+    .input("annualMaxAmount", sql.Decimal(12, 2), args.benefit.annualMaxAmount)
+    .input("utilizationAmount", sql.Decimal(12, 2), args.benefit.utilizationAfter)
+    .input("remainingAmount", sql.Decimal(12, 2), args.benefit.remainingAfter)
+    .input("recipientType", sql.NVarChar(40), args.recipientType)
+    .input("recipientEmail", sql.NVarChar(255), args.recipientEmail)
+    .input("recipientName", sql.NVarChar(200), args.recipientName)
+    .input("status", sql.NVarChar(40), args.recipientEmail ? "queued" : "pending_missing_recipient")
+    .input("emailQueueId", sql.BigInt, args.emailQueueId)
+    .input("payload", sql.NVarChar(sql.MAX), JSON.stringify({ validationStatus: args.benefit.status, validationMessage: args.benefit.message }))
+    .input("createdBy", sql.NVarChar(100), args.createdBy)
+    .query(`
+      INSERT INTO dbo.nbm_benefit_notifications (
+        order_id, program_rule_id, eligibility_object_id, patient_member_id, patient_name,
+        group_id, group_name, program_type, program_name, plan_year_start, plan_year_end,
+        notification_type, threshold_percent, annual_max_amount, utilization_amount, remaining_amount,
+        recipient_type, recipient_email, recipient_name, status, email_queue_id, payload_json, created_by
+      )
+      VALUES (
+        @orderId, @programRuleId, @eligibilityObjectId, @patientMemberId, @patientName,
+        @groupId, @groupName, @programType, @programName, @planYearStart, @planYearEnd,
+        'annual_max_reached', @thresholdPercent, @annualMaxAmount, @utilizationAmount, @remainingAmount,
+        @recipientType, @recipientEmail, @recipientName, @status, @emailQueueId, @payload, @createdBy
+      )
+    `)
+}
+
+async function queueBenefitNotifications(
+  tx: sql.Transaction,
+  args: {
+    orderId: string
+    orderNumber: string
+    patient: ResolvedPatient
+    program: NbmProgramRule
+    benefit: BenefitEvaluation
+    patientEmail: string | null
+    locationEmail: string | null
+    locationName: string | null
+    createdBy: string
+  }
+) {
+  if (!args.benefit.shouldNotifyMax) return
+
+  const patientName = `${args.patient.firstName || ""} ${args.patient.lastName || ""}`.trim()
+  const values = {
+    patient_name: patientName,
+    order_number: args.orderNumber,
+    program_name: args.program.programName,
+    utilization_amount: formatMoney(args.benefit.utilizationAfter),
+  }
+
+  if (args.program.patientNotificationEnabled) {
+    const emailQueueId = await queueImmediateEmail(tx, {
+      orderId: args.orderId,
+      ruleKey: "annual_max_patient",
+      recipientEmail: args.patientEmail,
+      recipientName: patientName,
+      values,
+    })
+
+    await insertBenefitNotification(tx, {
+      orderId: args.orderId,
+      patient: args.patient,
+      program: args.program,
+      benefit: args.benefit,
+      recipientType: "patient",
+      recipientEmail: args.patientEmail,
+      recipientName: patientName,
+      emailQueueId,
+      createdBy: args.createdBy,
+    })
+  }
+
+  if (args.program.locationNotificationEnabled) {
+    const emailQueueId = await queueImmediateEmail(tx, {
+      orderId: args.orderId,
+      ruleKey: "annual_max_location",
+      recipientEmail: args.locationEmail,
+      recipientName: args.locationName,
+      values,
+    })
+
+    await insertBenefitNotification(tx, {
+      orderId: args.orderId,
+      patient: args.patient,
+      program: args.program,
+      benefit: args.benefit,
+      recipientType: "strata_location",
+      recipientEmail: args.locationEmail,
+      recipientName: args.locationName,
+      emailQueueId,
+      createdBy: args.createdBy,
+    })
+  }
+}
+
 async function findNbmEligibilityPatient(pool: sql.ConnectionPool, patientId: unknown): Promise<ResolvedPatient | null> {
   const eligibilityId = getNbmEligibilityId(patientId)
   if (!eligibilityId) return null
@@ -111,7 +529,9 @@ async function findNbmEligibilityPatient(pool: sql.ConnectionPool, patientId: un
         state,
         zip,
         group_id AS groupId,
-        group_name AS groupName
+        group_name AS groupName,
+        supplement_allowance AS supplementAllowance,
+        supplement_discount AS supplementDiscount
       FROM dbo.nbm_full_eligibility
       WHERE id = @eligibilityId
     `)
@@ -136,6 +556,8 @@ async function findNbmEligibilityPatient(pool: sql.ConnectionPool, patientId: un
     zip: row.zip || null,
     groupId: row.groupId || null,
     groupName: row.groupName || null,
+    supplementAllowance: row.supplementAllowance == null ? null : Number(row.supplementAllowance),
+    supplementDiscount: row.supplementDiscount == null ? null : Number(row.supplementDiscount),
   }
 }
 
@@ -262,6 +684,16 @@ export async function POST(
     const shippingCity = body.shippingCity || patient.city || null
     const shippingState = body.shippingState || patient.state || null
     const shippingZip = body.shippingZip || patient.zip || null
+    const program = await resolveProgramRule(pool, patient, locationId, body, submittedAt)
+    const benefit = await evaluateBenefit(pool, patient, validItems, program, submittedAt)
+
+    if (benefit.status.startsWith("rejected_")) {
+      await tx.rollback()
+      return NextResponse.json(
+        { error: benefit.message, validationStatus: benefit.status },
+        { status: 422 }
+      )
+    }
 
     const orderResult = await tx.request()
       .input("orderNumber", sql.NVarChar(32), orderNumber)
@@ -291,6 +723,18 @@ export async function POST(
       .input("shippingZip", sql.NVarChar(30), shippingZip)
       .input("deliveryMethod", sql.NVarChar(50), deliveryMethod)
       .input("providerNotes", sql.NVarChar(sql.MAX), body.notes || null)
+      .input("programRuleId", sql.UniqueIdentifier, program.ruleId)
+      .input("programType", sql.NVarChar(40), program.programType)
+      .input("programName", sql.NVarChar(200), program.programName)
+      .input("planYearStart", sql.Date, benefit.planYearStart)
+      .input("planYearEnd", sql.Date, benefit.planYearEnd)
+      .input("annualMaxAmount", sql.Decimal(12, 2), benefit.annualMaxAmount)
+      .input("annualUtilizationBefore", sql.Decimal(12, 2), benefit.utilizationBefore)
+      .input("annualUtilizationAfter", sql.Decimal(12, 2), benefit.utilizationAfter)
+      .input("annualRemainingAfter", sql.Decimal(12, 2), benefit.remainingAfter)
+      .input("benefitValidationStatus", sql.NVarChar(40), benefit.status)
+      .input("benefitValidationMessage", sql.NVarChar(500), benefit.message)
+      .input("programSnapshot", sql.NVarChar(sql.MAX), JSON.stringify(program))
       .query(`
         INSERT INTO dbo.nbm_rx_orders (
           order_number, source_reference, provider_user_id, provider_name, provider_email, provider_npi,
@@ -299,7 +743,10 @@ export async function POST(
           patient_first_name, patient_last_name, patient_dob, patient_email, patient_phone,
           group_id, group_name,
           shipping_address1, shipping_address2, shipping_city, shipping_state, shipping_zip,
-          delivery_method, provider_notes, submitted_by
+          delivery_method, provider_notes, submitted_by,
+          program_rule_id, program_type, program_name, plan_year_start, plan_year_end,
+          annual_max_amount, annual_utilization_before, annual_utilization_after, annual_remaining_after,
+          benefit_validation_status, benefit_validation_message, program_snapshot_json
         )
         OUTPUT inserted.id
         VALUES (
@@ -309,7 +756,10 @@ export async function POST(
           @patientFirstName, @patientLastName, @patientDob, @patientEmail, @patientPhone,
           @groupId, @groupName,
           @shippingAddress1, @shippingAddress2, @shippingCity, @shippingState, @shippingZip,
-          @deliveryMethod, @providerNotes, @providerUserId
+          @deliveryMethod, @providerNotes, @providerUserId,
+          @programRuleId, @programType, @programName, @planYearStart, @planYearEnd,
+          @annualMaxAmount, @annualUtilizationBefore, @annualUtilizationAfter, @annualRemainingAfter,
+          @benefitValidationStatus, @benefitValidationMessage, @programSnapshot
         )
       `)
 
@@ -322,6 +772,12 @@ export async function POST(
       const nextFillDate = asDate(item.nextFillDate) || processRefillDate
       const sixMonthDate = addMonths(processRefillDate, 6)
       const nineMonthDate = addMonths(processRefillDate, 9)
+      const normalizedItem: RxItemInput = {
+        ...item,
+        automaticRefill: program.refillsAllowed && item.automaticRefill !== false,
+        copayAmount: program.copayEnabled ? asNumber(item.copayAmount) ?? undefined : 0,
+        retailCost: asNumber(item.retailCost) ?? undefined,
+      }
 
       const itemResult = await tx.request()
         .input("orderId", sql.UniqueIdentifier, orderId)
@@ -334,36 +790,50 @@ export async function POST(
         .input("numberOfBottles", sql.Int, 1)
         .input("refillFrequencyDays", sql.Int, refillFrequencyDays)
         .input("refillDurationMonths", sql.Int, asNumber(item.refillDurationMonths))
-        .input("automaticRefill", sql.Bit, Boolean(item.automaticRefill))
-        .input("copayAmount", sql.Decimal(12, 2), asNumber(item.copayAmount))
-        .input("retailCost", sql.Decimal(12, 2), asNumber(item.retailCost))
+        .input("automaticRefill", sql.Bit, Boolean(normalizedItem.automaticRefill))
+        .input("copayAmount", sql.Decimal(12, 2), asNumber(normalizedItem.copayAmount))
+        .input("retailCost", sql.Decimal(12, 2), asNumber(normalizedItem.retailCost))
         .input("nextFillDate", sql.Date, nextFillDate)
         .input("processRefillDate", sql.Date, processRefillDate)
         .input("sixMonthDate", sql.Date, sixMonthDate)
         .input("nineMonthDate", sql.Date, nineMonthDate)
+        .input("utilizationAmount", sql.Decimal(12, 2), itemUtilizationAmount(normalizedItem))
+        .input("benefitAction", sql.NVarChar(40), benefit.status)
         .query(`
           INSERT INTO dbo.nbm_rx_order_items (
             order_id, line_number, product_object_id, product_sku, product_name, therapy_type, dosage,
             number_of_bottles, refill_frequency_days, refill_duration_months, automatic_refill,
             copay_amount, retail_cost, next_fill_date, process_refill_date,
-            six_month_process_refill_date, nine_month_process_refill_date
+            six_month_process_refill_date, nine_month_process_refill_date,
+            utilization_amount, benefit_action
           )
           OUTPUT inserted.id
           VALUES (
             @orderId, @lineNumber, @productId, @productSku, @productName, @therapyType, @dosage,
             @numberOfBottles, @refillFrequencyDays, @refillDurationMonths, @automaticRefill,
             @copayAmount, @retailCost, @nextFillDate, @processRefillDate,
-            @sixMonthDate, @nineMonthDate
+            @sixMonthDate, @nineMonthDate, @utilizationAmount, @benefitAction
           )
         `)
 
+      const itemId = itemResult.recordset[0].id as string
       createdItems.push({
-        id: itemResult.recordset[0].id as string,
+        id: itemId,
         productName: item.productName?.trim() || "",
         processRefillDate,
         nextFillDate,
         sixMonthDate,
         nineMonthDate,
+      })
+
+      await insertUtilizationEvent(tx, {
+        orderId,
+        itemId,
+        item: normalizedItem,
+        patient,
+        program,
+        benefit,
+        createdBy: session.user.id,
       })
     }
 
@@ -388,6 +858,7 @@ export async function POST(
       SELECT rule_key, subject_template, body_template, trigger_date_field, offset_days
       FROM dbo.nbm_email_rules
       WHERE active = 1
+        AND rule_key NOT IN ('annual_max_patient', 'annual_max_location', 'refill_payment_request')
     `)
 
     const recipientEmail = patientEmail || session.user.email
@@ -430,8 +901,25 @@ export async function POST(
       }
     }
 
+    await queueBenefitNotifications(tx, {
+      orderId,
+      orderNumber,
+      patient,
+      program,
+      benefit,
+      patientEmail,
+      locationEmail: body.locationEmail || null,
+      locationName: location.name || null,
+      createdBy: session.user.id,
+    })
+
     await tx.commit()
-    return NextResponse.json({ id: orderId, orderNumber }, { status: 201 })
+    return NextResponse.json({
+      id: orderId,
+      orderNumber,
+      benefitValidationStatus: benefit.status,
+      annualRemainingAfter: benefit.remainingAfter,
+    }, { status: 201 })
   } catch (err) {
     await tx.rollback().catch(() => undefined)
     console.error("[rx-orders]", err)
