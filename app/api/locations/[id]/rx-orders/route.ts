@@ -93,10 +93,6 @@ function renderTemplate(template: string | null, values: Record<string, string>)
   return (template || "").replace(/\{\{(\w+)\}\}/g, (_, key) => values[key] || "")
 }
 
-function toSqlDate(date: Date | null) {
-  return date ? date.toISOString().slice(0, 10) : null
-}
-
 function formatMoney(value: number | null) {
   if (value == null) return "unconfigured"
   return `$${Number(value).toFixed(2)}`
