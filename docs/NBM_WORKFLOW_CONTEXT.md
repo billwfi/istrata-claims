@@ -1,6 +1,6 @@
 # NBM Workflow Context
 
-Date: 2026-06-03
+Date: 2026-06-11
 
 This repo is the provider-facing entry point for the NBM RX workflow. The current branch adds the local/provider path for selecting eligibility patients, selecting NBM product-master products, and submitting RX orders into the `NBM` SQL database.
 
@@ -15,11 +15,17 @@ The test password is intentionally not documented here. Use the local project ha
 
 ## Eligibility Lookup
 
-The RX form now calls `/api/patients?includeNbmEligibility=1` so it can search `NBM.dbo.nbm_full_eligibility` in addition to local patient data. NBM eligibility rows are returned with ids in this format:
+The RX form now calls `/api/patients?includeNbmEligibility=1` so it can search live NBM eligibility in addition to local patient data. The NBM eligibility source is:
+
+- `iStrata.dbo.vw_Full_Eligibility`, filtered to groups with a non-cancelled `NBM` benefit row in live Contracts + Benefits.
+
+Live eligibility rows are returned with ids in this format:
 
 ```text
-nbm-eligibility-{id}
+nbm-live-eligibility-{encoded-source-key}
 ```
+
+As of 2026-06-11, the live `source-key` is a SHA-256 hash of a composite member identity from the full eligibility view (`category`, `groupid`, `Employee ID`, `Customer Account Number`, `profileid`, and `insuranceid`). Do not use `Customer Account Number` by itself for this key: it is not unique enough and can cause an Initial RX submit to resolve a different eligibility row than the one selected in search. DOB is deliberately not part of the live typeahead key because the consolidated eligibility view can expose upstream date conversion errors during broad searches.
 
 When an NBM eligibility patient is selected, the RX form autofills:
 
@@ -28,11 +34,25 @@ When an NBM eligibility patient is selected, the RX form autofills:
 - shipping address
 - city/state/ZIP
 
-The patient search route only includes NBM eligibility rows when `includeNbmEligibility=1`, so the legacy claims form can continue using the local patient list without automatically mixing in NBM eligibility data.
+The patient search route only includes NBM eligibility rows when `includeNbmEligibility=1`, so the legacy claims form can continue using the local patient list without automatically mixing in NBM eligibility data. The lookup does not select or return SSN values from the live eligibility view. District-specific imported eligibility tables, such as D11, are treated as upstream inputs owned by Bill/Claude's eligibility process; NBM reads the consolidated `vw_Full_Eligibility` surface.
+
+Runtime NBM patient search and RX submission no longer use `NBM.dbo.nbm_full_eligibility`, `nbm-eligibility-{id}`, or `iStrata.dbo.vw_NBM_Full_Eligibility`.
+
+On 2026-06-11, live DB verification found that Stephanie Aaron exists in `iStrata.dbo.vw_Full_Eligibility` under D11 group `SDPCD11SD`, but not in the old NBM-specific view/copy. `SDPCD11SD` has a live NBM contract-benefit row beginning 2026-07-01, so the provider RX path allows future-effective contract-benefit rows for lookup and selects the current or nearest future contract-benefit program rule at submit time.
 
 ## RX Submission
 
-`app/api/locations/[id]/rx-orders/route.ts` now detects `nbm-eligibility-*` patient ids and resolves the patient from `NBM.dbo.nbm_full_eligibility` before inserting the order into NBM tables.
+`app/api/locations/[id]/rx-orders/route.ts` now detects `nbm-live-eligibility-*` patient ids. Live rows resolve from `iStrata.dbo.vw_Full_Eligibility` with the Contracts + Benefits NBM group filter before inserting the order into NBM tables.
+
+The provider-facing claims form now follows the same NBM order shape as the management app:
+
+- NBM category is fixed to `Initial RX`
+- delivery method is limited to `Local` or `Mail`
+- therapy type is no longer captured in the claims workflow
+- bottle count is always stored as `1`
+- product-derived fields are read-only in the form
+- refill-specific fields and calculated refill dates are hidden from providers
+- the API calculates refill dates server-side when the browser does not send them
 
 NBM RX orders store these eligibility-related fields when available:
 
@@ -50,13 +70,64 @@ The order insert continues to create:
 - `dbo.nbm_workflow_events`
 - `dbo.nbm_email_queue`
 
+Downstream management-app refill handling now adds:
+
+- `dbo.nbm_refill_tasks`
+- `dbo.nbm_payment_requests`
+- `dbo.nbm_payment_events`
+
+The claims app should continue submitting provider-facing `Initial RX` orders only. Refill task creation, hosted USIO payment-link generation, automatic refill payment email queueing, SMTP sending, and future USIO API/webhook reconciliation are owned by the management app.
+
+## Program Rule / Contract Benefit Resolution
+
+As of 2026-06-09, provider RX submission prepares for the live management contract-benefit model before it evaluates allocation, copay, and retail pricing.
+
+When `app/api/locations/[id]/rx-orders/route.ts` submits an NBM order, it:
+
+- resolves the selected NBM eligibility patient from full live eligibility
+- syncs non-cancelled group contract-benefit rows from:
+  - `iStrata.dbo.is_group_contracts`
+  - `iStrata.dbo.is_contract_benefits`
+- upserts those rows into `NBM.dbo.nbm_program_rules`
+- resolves the program rule with `iStrata.is_contract_benefits` as the preferred source
+- stores the resolved rule in `program_snapshot_json`
+
+Current mapping:
+
+- `is_group_contracts.ContractStartDate` -> rule effective date
+- `is_group_contracts.ContractEndDate` -> rule end date
+- `is_group_contracts.ContractStatus` -> active/inactive filtering
+- `is_group_contracts.BillingCycle` -> billing frequency
+- `is_contract_benefits` row where `benefit_type = 'NBM'`
+  - `NBMType` -> naming/notes
+  - `AnnualMaxAllowance` -> annual allocation
+  - `CopayAmount` -> notes for now
+- `is_contract_benefits` row where `benefit_type = 'PEPM'`
+  - `PEPMRate` -> PEPM rate
+  - `NBMFee` and `IStrataAdminFee` -> notes for now
+
+Refill policy note:
+
+- The live contract-benefits model now exposes `is_contract_benefits.RefillsAllowed`.
+- The claims API maps that bit into `NBM.dbo.nbm_program_rules.refills_allowed` before provider RX submission is evaluated.
+- `RefillsAllowed = 1` allows automatic refill task creation downstream.
+- `RefillsAllowed = 0` prevents automatic refill task creation downstream.
+- Existing `NULL` values default to allowed until reviewed.
+- Program snapshots include `refillPolicySource = "contract_benefit_refills_allowed"` for explicit true/false values and `refillPolicySource = "contract_benefit_null_default_allowed"` for null defaults.
+
+2026-06-10 live sync note:
+
+- `NBM.dbo.nbm_program_rules` now contains 10 active snapshots from `iStrata.is_contract_benefits`.
+- Provider-submitted initial orders should pick up explicit no-refill policies for groups where `RefillsAllowed = 0`.
+- Groups with `RefillsAllowed = NULL` still default to allowed pending contract review.
+
 ## Product Lookup
 
-The RX form product combobox searches the NBM product master through `/api/products`. Selecting a product autofills SKU, therapy type, product form, copay, and retail cost where available.
+The RX form product combobox searches the NBM product master through `/api/products`. Selecting a product autofills SKU, product form, copay, and retail cost where available.
 
 ## Email Notification Status
 
-The current implementation queues email notifications in `dbo.nbm_email_queue`; it does not send real email yet.
+The claims app queues initial order notification records in `dbo.nbm_email_queue`; it does not send real email directly.
 
 Current seeded rules include:
 
@@ -64,7 +135,7 @@ Current seeded rules include:
 - `three_day_refill_followup`
 - `six_month_initial`
 
-A future email sender should process due `pending` rows, send through an approved SMTP/API provider, then mark rows `sent` or `failed` and write workflow events.
+The management app now contains staged SMTP-ready refill payment email automation. Real SMTP sending remains disabled until SMTP environment variables are configured. Refill payment emails currently use the hosted USIO prefill URL; future USIO API/webhook payment confirmation should be reconciled in the management app.
 
 ## Test Row
 

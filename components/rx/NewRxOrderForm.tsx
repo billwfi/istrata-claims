@@ -61,34 +61,22 @@ interface RxItem {
   productId: string
   productName: string
   productSku: string
-  therapyType: string
   productFormType: string
   dosage: string
-  numberOfBottles: string
-  refillFrequencyDays: string
-  refillDurationMonths: string
-  automaticRefill: boolean
   copayAmount: string
   retailCost: string
-  nextFillDate: string
-  processRefillDate: string
 }
+
+const deliveryMethods = ["Local", "Mail"] as const
 
 const emptyItem = (): RxItem => ({
   productId: "",
   productName: "",
   productSku: "",
-  therapyType: "",
   productFormType: "",
   dosage: "",
-  numberOfBottles: "1",
-  refillFrequencyDays: "",
-  refillDurationMonths: "",
-  automaticRefill: true,
   copayAmount: "",
   retailCost: "",
-  nextFillDate: "",
-  processRefillDate: "",
 })
 
 export function NewRxOrderForm({ locationId }: NewRxOrderFormProps) {
@@ -104,7 +92,7 @@ export function NewRxOrderForm({ locationId }: NewRxOrderFormProps) {
   const [shippingCity, setShippingCity] = useState("")
   const [shippingState, setShippingState] = useState("")
   const [shippingZip, setShippingZip] = useState("")
-  const [deliveryMethod, setDeliveryMethod] = useState("")
+  const [deliveryMethod, setDeliveryMethod] = useState<(typeof deliveryMethods)[number]>("Local")
   const [notes, setNotes] = useState("")
   const [items, setItems] = useState<RxItem[]>([emptyItem()])
 
@@ -255,7 +243,6 @@ export function NewRxOrderForm({ locationId }: NewRxOrderFormProps) {
       productId: product.id,
       productName: product.itemName,
       productSku: product.itemSku || "",
-      therapyType: product.itemType || product.clinicalTier || "",
       productFormType: product.productFormType || "",
       copayAmount: product.copaymentTier == null ? "" : String(product.copaymentTier),
       retailCost: product.retailCost == null ? "" : String(product.retailCost),
@@ -280,6 +267,7 @@ export function NewRxOrderForm({ locationId }: NewRxOrderFormProps) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          orderCategory: "Initial RX",
           patientId,
           providerId,
           patientEmail: patientEmail.trim() || null,
@@ -289,19 +277,17 @@ export function NewRxOrderForm({ locationId }: NewRxOrderFormProps) {
           shippingCity: shippingCity.trim() || null,
           shippingState: shippingState.trim() || null,
           shippingZip: shippingZip.trim() || null,
-          deliveryMethod: deliveryMethod.trim() || null,
+          deliveryMethod,
           notes: notes.trim() || null,
           items: validItems.map((item) => ({
-            ...item,
             productName: item.productName.trim(),
             productId: item.productId || null,
             productSku: item.productSku.trim() || null,
-            therapyType: item.therapyType.trim() || null,
             productFormType: item.productFormType.trim() || null,
             dosage: item.dosage.trim() || null,
-            numberOfBottles: item.numberOfBottles ? Number(item.numberOfBottles) : null,
-            refillFrequencyDays: item.refillFrequencyDays ? Number(item.refillFrequencyDays) : null,
-            refillDurationMonths: item.refillDurationMonths ? Number(item.refillDurationMonths) : null,
+            numberOfBottles: 1,
+            refillFrequencyDays: 30,
+            automaticRefill: true,
             copayAmount: item.copayAmount ? Number(item.copayAmount) : null,
             retailCost: item.retailCost ? Number(item.retailCost) : null,
           })),
@@ -373,6 +359,20 @@ export function NewRxOrderForm({ locationId }: NewRxOrderFormProps) {
       <Card>
       <CardContent className="p-6 space-y-8">
         <div className="grid gap-6 md:grid-cols-2">
+          <div className="space-y-2">
+            <Label htmlFor="delivery-method">Delivery method</Label>
+            <select
+              id="delivery-method"
+              className="h-8 w-full rounded-lg border border-input bg-transparent px-2.5 py-1 text-sm"
+              value={deliveryMethod}
+              onChange={(e) => setDeliveryMethod(e.target.value as (typeof deliveryMethods)[number])}
+            >
+              {deliveryMethods.map((method) => (
+                <option key={method} value={method}>{method}</option>
+              ))}
+            </select>
+          </div>
+
           <div className="space-y-2">
             <Label>Patient <span className="text-red-500">*</span></Label>
             <SearchCombobox
@@ -448,10 +448,6 @@ export function NewRxOrderForm({ locationId }: NewRxOrderFormProps) {
                 <Input id="ship-zip" value={shippingZip} onChange={(e) => setShippingZip(e.target.value)} />
               </div>
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="delivery-method">Delivery method</Label>
-              <Input id="delivery-method" placeholder="Mail, pickup, courier" value={deliveryMethod} onChange={(e) => setDeliveryMethod(e.target.value)} />
-            </div>
           </div>
         </div>
 
@@ -496,15 +492,11 @@ export function NewRxOrderForm({ locationId }: NewRxOrderFormProps) {
                   </div>
                   <div className="space-y-2">
                     <Label>SKU</Label>
-                    <Input value={item.productSku} onChange={(e) => updateItem(index, { productSku: e.target.value })} />
-                  </div>
-                  <div className="space-y-2">
-                    <Label>Therapy type</Label>
-                    <Input value={item.therapyType} onChange={(e) => updateItem(index, { therapyType: e.target.value })} />
+                    <Input value={item.productSku} readOnly />
                   </div>
                   <div className="space-y-2">
                     <Label>Product form</Label>
-                    <Input value={item.productFormType} onChange={(e) => updateItem(index, { productFormType: e.target.value })} />
+                    <Input value={item.productFormType} readOnly />
                   </div>
                   <div className="space-y-2">
                     <Label>Dosage</Label>
@@ -512,40 +504,18 @@ export function NewRxOrderForm({ locationId }: NewRxOrderFormProps) {
                   </div>
                   <div className="space-y-2">
                     <Label>Bottles</Label>
-                    <Input type="number" min="1" value={item.numberOfBottles} onChange={(e) => updateItem(index, { numberOfBottles: e.target.value })} />
-                  </div>
-                  <div className="space-y-2">
-                    <Label>Refill frequency days</Label>
-                    <Input type="number" min="0" value={item.refillFrequencyDays} onChange={(e) => updateItem(index, { refillFrequencyDays: e.target.value })} />
-                  </div>
-                  <div className="space-y-2">
-                    <Label>Refill duration months</Label>
-                    <Input type="number" min="0" value={item.refillDurationMonths} onChange={(e) => updateItem(index, { refillDurationMonths: e.target.value })} />
+                    <div className="flex h-8 items-center rounded-lg border border-input px-2.5 text-sm text-gray-700">
+                      1 bottle
+                    </div>
                   </div>
                   <div className="space-y-2">
                     <Label>Copay</Label>
-                    <Input type="number" min="0" step="0.01" value={item.copayAmount} onChange={(e) => updateItem(index, { copayAmount: e.target.value })} />
+                    <Input type="number" min="0" step="0.01" value={item.copayAmount} readOnly />
                   </div>
                   <div className="space-y-2">
                     <Label>Retail cost</Label>
-                    <Input type="number" min="0" step="0.01" value={item.retailCost} onChange={(e) => updateItem(index, { retailCost: e.target.value })} />
+                    <Input type="number" min="0" step="0.01" value={item.retailCost} readOnly />
                   </div>
-                  <div className="space-y-2">
-                    <Label>Next fill date</Label>
-                    <Input type="date" value={item.nextFillDate} onChange={(e) => updateItem(index, { nextFillDate: e.target.value })} />
-                  </div>
-                  <div className="space-y-2">
-                    <Label>Process refill date</Label>
-                    <Input type="date" value={item.processRefillDate} onChange={(e) => updateItem(index, { processRefillDate: e.target.value })} />
-                  </div>
-                  <label className="flex items-center gap-2 text-sm text-gray-700 pt-7">
-                    <input
-                      type="checkbox"
-                      checked={item.automaticRefill}
-                      onChange={(e) => updateItem(index, { automaticRefill: e.target.checked })}
-                    />
-                    Automatic refill
-                  </label>
                 </div>
               </div>
             ))}
