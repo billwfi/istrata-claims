@@ -24,31 +24,20 @@ const LIVE_ELIGIBILITY_SOURCE_KEY_SQL = `
     COALESCE(CONVERT(nvarchar(10), TRY_CONVERT(date, e.DOB), 23), '')
   )), 2)
 `
-const ACTIVE_NBM_ELIGIBILITY_GROUP_SQL = `
-  AND (
-    EXISTS (
-      SELECT 1
-      FROM iStrata.dbo.is_group_contracts c
-      INNER JOIN iStrata.dbo.is_groups g ON g.id = c.group_id
-      INNER JOIN iStrata.dbo.is_contract_benefits nbm
-        ON nbm.contract_id = c.id
-       AND nbm.benefit_type = 'NBM'
-      WHERE NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), g.GroupId))), '') =
-            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.groupid))), '')
-        AND (c.ContractStartDate IS NULL OR CAST(c.ContractStartDate AS date) <= CAST(GETDATE() AS date))
-        AND (c.ContractEndDate IS NULL OR CAST(c.ContractEndDate AS date) >= CAST(GETDATE() AS date))
-        AND (
-          c.ContractStatus IS NULL
-          OR LOWER(CONVERT(nvarchar(80), c.ContractStatus)) NOT IN ('inactive', 'expired', 'terminated', 'cancelled', 'canceled')
-        )
-    )
-    OR EXISTS (
-      SELECT 1
-      FROM dbo.nbm_program_rules r
-      WHERE r.active = 1
-        AND NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), r.group_id))), '') =
-            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.groupid))), '')
-    )
+const NBM_CONTRACT_BENEFIT_ELIGIBILITY_GROUP_SQL = `
+  AND EXISTS (
+    SELECT 1
+    FROM iStrata.dbo.is_group_contracts c
+    INNER JOIN iStrata.dbo.is_groups g ON g.id = c.group_id
+    INNER JOIN iStrata.dbo.is_contract_benefits nbm
+      ON nbm.contract_id = c.id
+     AND nbm.benefit_type = 'NBM'
+    WHERE NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), g.GroupId))), '') =
+          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.groupid))), '')
+      AND (
+        c.ContractStatus IS NULL
+        OR LOWER(CONVERT(nvarchar(80), c.ContractStatus)) NOT IN ('inactive', 'expired', 'terminated', 'cancelled', 'canceled')
+      )
   )
 `
 
@@ -112,31 +101,6 @@ function mapLiveEligibilityPatient(row: Record<string, unknown>): PatientSearchR
     eligibilityObjectId: liveEligibilityObjectId(sourceKey),
     source: LIVE_NBM_ELIGIBILITY_SOURCE,
     sourceKey,
-  }
-}
-
-function mapCopiedEligibilityPatient(row: Record<string, unknown>): PatientSearchResult {
-  const eligibilityObjectId = cleanValue(row.eligibilityObjectId) || cleanValue(row.id) || ""
-  return {
-    id: `nbm-eligibility-${eligibilityObjectId}`,
-    firstName: cleanValue(row.firstName),
-    lastName: cleanValue(row.lastName),
-    dob: row.dob as Date | string | null,
-    memberId: cleanValue(row.memberId),
-    employeeId: cleanValue(row.employeeId),
-    email: cleanValue(row.email),
-    phone: cleanValue(row.phone),
-    address1: cleanValue(row.address1),
-    address2: cleanValue(row.address2),
-    city: cleanValue(row.city),
-    state: cleanValue(row.state),
-    zip: cleanValue(row.zip),
-    groupId: cleanValue(row.groupId),
-    groupName: cleanValue(row.groupName),
-    supplementAllowance: row.supplementAllowance == null ? null : Number(row.supplementAllowance),
-    supplementDiscount: row.supplementDiscount == null ? null : Number(row.supplementDiscount),
-    eligibilityObjectId,
-    source: "nbm_full_eligibility",
   }
 }
 
@@ -211,75 +175,16 @@ async function searchLiveEligibilityPatients(pool: sql.ConnectionPool, q: string
           e.recordstatus IS NULL
           OR LOWER(LTRIM(RTRIM(CONVERT(nvarchar(80), e.recordstatus)))) NOT IN ('inactive', 'terminated')
         )
-        ${ACTIVE_NBM_ELIGIBILITY_GROUP_SQL}
+        ${NBM_CONTRACT_BENEFIT_ELIGIBILITY_GROUP_SQL}
       ORDER BY e.[Last Name] ASC, e.[First Name] ASC, e.[Customer Account Number] ASC
     `)
 
   return result.recordset.map(mapLiveEligibilityPatient)
 }
 
-async function searchCopiedEligibilityPatients(pool: sql.ConnectionPool, q: string) {
-  const search = `%${q}%`
-  const result = await pool.request()
-    .input("q", sql.NVarChar(255), search)
-    .input("hasQuery", sql.Bit, Boolean(q.trim()))
-    .query(`
-      SELECT TOP 50
-        CONVERT(nvarchar(100), id) AS eligibilityObjectId,
-        first_name AS firstName,
-        last_name AS lastName,
-        dob,
-        COALESCE(NULLIF(insurance_id, ''), NULLIF(employee_id, ''), source_key) AS memberId,
-        employee_id AS employeeId,
-        COALESCE(NULLIF(personal_email, ''), NULLIF(work_email, '')) AS email,
-        phone,
-        address1,
-        address2,
-        city,
-        state,
-        zip,
-        group_id AS groupId,
-        group_name AS groupName,
-        supplement_allowance AS supplementAllowance,
-        supplement_discount AS supplementDiscount
-      FROM dbo.nbm_full_eligibility
-      WHERE (
-          @hasQuery = 0
-          OR first_name LIKE @q
-          OR last_name LIKE @q
-          OR CONCAT(first_name, ' ', last_name) LIKE @q
-          OR CONCAT(last_name, ' ', first_name) LIKE @q
-          OR personal_email LIKE @q
-          OR work_email LIKE @q
-          OR employee_id LIKE @q
-          OR insurance_id LIKE @q
-          OR profile_id LIKE @q
-        )
-        AND (
-          record_status IS NULL
-          OR record_status NOT IN ('Inactive', 'Terminated')
-        )
-      ORDER BY last_name ASC, first_name ASC, id DESC
-    `)
-
-  return result.recordset.map(mapCopiedEligibilityPatient)
-}
-
 async function searchNbmEligibilityPatients(q: string) {
   const pool = await getNbmPool(await getNbmSqlPasswordFromCookies())
-  const combined: PatientSearchResult[] = []
-  let firstError: unknown = null
-
-  for (const searcher of [searchLiveEligibilityPatients, searchCopiedEligibilityPatients]) {
-    try {
-      combined.push(...await searcher(pool, q))
-    } catch (err) {
-      if (!firstError) firstError = err
-      console.warn("NBM eligibility search source unavailable", err instanceof Error ? err.message : err)
-    }
-  }
-
-  if (!combined.length && firstError) throw firstError
+  const combined = await searchLiveEligibilityPatients(pool, q)
 
   const seen = new Set<string>()
   return combined.filter((row) => {

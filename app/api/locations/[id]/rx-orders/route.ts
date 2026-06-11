@@ -45,31 +45,20 @@ const LIVE_ELIGIBILITY_SOURCE_KEY_SQL = `
     COALESCE(CONVERT(nvarchar(10), TRY_CONVERT(date, e.DOB), 23), '')
   )), 2)
 `
-const ACTIVE_NBM_ELIGIBILITY_GROUP_SQL = `
-  AND (
-    EXISTS (
-      SELECT 1
-      FROM iStrata.dbo.is_group_contracts c
-      INNER JOIN iStrata.dbo.is_groups g ON g.id = c.group_id
-      INNER JOIN iStrata.dbo.is_contract_benefits nbm
-        ON nbm.contract_id = c.id
-       AND nbm.benefit_type = 'NBM'
-      WHERE NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), g.GroupId))), '') =
-            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.groupid))), '')
-        AND (c.ContractStartDate IS NULL OR CAST(c.ContractStartDate AS date) <= CAST(GETDATE() AS date))
-        AND (c.ContractEndDate IS NULL OR CAST(c.ContractEndDate AS date) >= CAST(GETDATE() AS date))
-        AND (
-          c.ContractStatus IS NULL
-          OR LOWER(CONVERT(nvarchar(80), c.ContractStatus)) NOT IN ('inactive', 'expired', 'terminated', 'cancelled', 'canceled')
-        )
-    )
-    OR EXISTS (
-      SELECT 1
-      FROM dbo.nbm_program_rules r
-      WHERE r.active = 1
-        AND NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), r.group_id))), '') =
-            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.groupid))), '')
-    )
+const NBM_CONTRACT_BENEFIT_ELIGIBILITY_GROUP_SQL = `
+  AND EXISTS (
+    SELECT 1
+    FROM iStrata.dbo.is_group_contracts c
+    INNER JOIN iStrata.dbo.is_groups g ON g.id = c.group_id
+    INNER JOIN iStrata.dbo.is_contract_benefits nbm
+      ON nbm.contract_id = c.id
+     AND nbm.benefit_type = 'NBM'
+    WHERE NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), g.GroupId))), '') =
+          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.groupid))), '')
+      AND (
+        c.ContractStatus IS NULL
+        OR LOWER(CONVERT(nvarchar(80), c.ContractStatus)) NOT IN ('inactive', 'expired', 'terminated', 'cancelled', 'canceled')
+      )
   )
 `
 
@@ -114,14 +103,6 @@ interface LiveContractBenefitRow {
   nbm_fee?: number | string | null
 }
 
-function getNbmEligibilityId(value: unknown) {
-  const text = String(value || "")
-  if (!text.startsWith("nbm-eligibility-")) return null
-
-  const id = Number(text.replace("nbm-eligibility-", ""))
-  return Number.isInteger(id) && id > 0 ? id : null
-}
-
 function getNbmLiveEligibilityKey(value: unknown) {
   const text = String(value || "")
   if (!text.startsWith(LIVE_NBM_ELIGIBILITY_PREFIX)) return null
@@ -135,8 +116,7 @@ function getNbmLiveEligibilityKey(value: unknown) {
 }
 
 function isNbmEligibilityPatientId(value: unknown) {
-  return getNbmEligibilityId(value) != null
-    || getNbmLiveEligibilityKey(value) != null
+  return getNbmLiveEligibilityKey(value) != null
 }
 
 function liveEligibilityId(sourceKey: unknown) {
@@ -387,15 +367,20 @@ async function getLiveContractBenefitRows(
         ON pepm.contract_id = c.id
        AND pepm.benefit_type = 'PEPM'
       WHERE (@groupId IS NULL OR g.GroupId = @groupId OR CONVERT(nvarchar(100), c.group_id) = @groupId)
-        AND (c.ContractStartDate IS NULL OR CAST(c.ContractStartDate AS date) <= @effectiveOn)
-        AND (c.ContractEndDate IS NULL OR CAST(c.ContractEndDate AS date) >= @effectiveOn)
         AND (
           c.ContractStatus IS NULL
           OR LOWER(CONVERT(nvarchar(80), c.ContractStatus)) NOT IN ('inactive', 'expired', 'terminated', 'cancelled', 'canceled')
         )
       ORDER BY
         CASE WHEN LOWER(CONVERT(nvarchar(80), c.ContractStatus)) = 'active' THEN 0 ELSE 1 END,
-        c.ContractStartDate DESC,
+        CASE
+          WHEN (c.ContractStartDate IS NULL OR CAST(c.ContractStartDate AS date) <= @effectiveOn)
+           AND (c.ContractEndDate IS NULL OR CAST(c.ContractEndDate AS date) >= @effectiveOn) THEN 0
+          WHEN c.ContractStartDate IS NOT NULL AND CAST(c.ContractStartDate AS date) > @effectiveOn THEN 1
+          ELSE 2
+        END,
+        CASE WHEN c.ContractStartDate IS NOT NULL AND CAST(c.ContractStartDate AS date) > @effectiveOn THEN c.ContractStartDate END ASC,
+        CASE WHEN c.ContractStartDate IS NULL OR CAST(c.ContractStartDate AS date) <= @effectiveOn THEN c.ContractStartDate END DESC,
         c.id DESC,
         nbm.id DESC
     `)
@@ -583,8 +568,6 @@ async function resolveProgramRule(pool: sql.ConnectionPool, patient: ResolvedPat
       FROM dbo.nbm_program_rules r
       WHERE r.active = 1
         AND r.program_type = @programType
-        AND (r.effective_date IS NULL OR r.effective_date <= @effectiveOn)
-        AND (r.end_date IS NULL OR r.end_date >= @effectiveOn)
         AND (
           (r.location_id IS NOT NULL AND r.location_id = @locationId)
           OR (r.group_id IS NOT NULL AND r.group_id = @groupId)
@@ -596,11 +579,17 @@ async function resolveProgramRule(pool: sql.ConnectionPool, patient: ResolvedPat
         CASE
           WHEN r.source_system = '${CONTRACT_BENEFIT_SOURCE_SYSTEM}' THEN 0
           WHEN r.source_system = 'iStrata.is_group_contracts' THEN 1
-          WHEN r.source_system = 'nbm_full_eligibility' THEN 2
           WHEN r.source_system = 'system' THEN 9
           ELSE 4
         END,
-        r.effective_date DESC,
+        CASE
+          WHEN (r.effective_date IS NULL OR r.effective_date <= @effectiveOn)
+           AND (r.end_date IS NULL OR r.end_date >= @effectiveOn) THEN 0
+          WHEN r.effective_date IS NOT NULL AND r.effective_date > @effectiveOn THEN 1
+          ELSE 2
+        END,
+        CASE WHEN r.effective_date IS NOT NULL AND r.effective_date > @effectiveOn THEN r.effective_date END ASC,
+        CASE WHEN r.effective_date IS NULL OR r.effective_date <= @effectiveOn THEN r.effective_date END DESC,
         r.created_at DESC
     `)
 
@@ -944,7 +933,7 @@ async function findNbmEligibilityPatient(pool: sql.ConnectionPool, patientId: un
             e.recordstatus IS NULL
             OR LOWER(LTRIM(RTRIM(CONVERT(nvarchar(80), e.recordstatus)))) NOT IN ('inactive', 'terminated')
           )
-          ${ACTIVE_NBM_ELIGIBILITY_GROUP_SQL}
+          ${NBM_CONTRACT_BENEFIT_ELIGIBILITY_GROUP_SQL}
       `)
 
     const liveRow = liveResult.recordset[0]
@@ -972,57 +961,7 @@ async function findNbmEligibilityPatient(pool: sql.ConnectionPool, patientId: un
     }
   }
 
-  const eligibilityId = getNbmEligibilityId(patientId)
-  if (!eligibilityId) return null
-
-  const result = await pool.request()
-    .input("eligibilityId", sql.BigInt, eligibilityId)
-    .query(`
-      SELECT TOP 1
-        CONVERT(nvarchar(100), id) AS eligibilityObjectId,
-        first_name AS firstName,
-        last_name AS lastName,
-        dob,
-        COALESCE(NULLIF(insurance_id, ''), NULLIF(employee_id, ''), source_key) AS memberId,
-        employee_id AS employeeId,
-        COALESCE(NULLIF(personal_email, ''), NULLIF(work_email, '')) AS email,
-        phone,
-        address1,
-        address2,
-        city,
-        state,
-        zip,
-        group_id AS groupId,
-        group_name AS groupName,
-        supplement_allowance AS supplementAllowance,
-        supplement_discount AS supplementDiscount
-      FROM dbo.nbm_full_eligibility
-      WHERE id = @eligibilityId
-    `)
-
-  const row = result.recordset[0]
-  if (!row) return null
-
-  return {
-    id: `nbm-eligibility-${row.eligibilityObjectId}`,
-    firstName: row.firstName,
-    lastName: row.lastName,
-    dob: row.dob || null,
-    memberId: row.memberId || null,
-    eligibilityObjectId: row.eligibilityObjectId,
-    employeeId: row.employeeId || null,
-    email: row.email || null,
-    phone: row.phone || null,
-    address1: row.address1 || null,
-    address2: row.address2 || null,
-    city: row.city || null,
-    state: row.state || null,
-    zip: row.zip || null,
-    groupId: row.groupId || null,
-    groupName: row.groupName || null,
-    supplementAllowance: row.supplementAllowance == null ? null : Number(row.supplementAllowance),
-    supplementDiscount: row.supplementDiscount == null ? null : Number(row.supplementDiscount),
-  }
+  return null
 }
 
 async function findLocalPatient(patientId: string): Promise<ResolvedPatient | null> {
