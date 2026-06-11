@@ -23,6 +23,26 @@ interface RxItemInput {
 
 const VALID_ORDER_CATEGORIES = new Set(["Initial RX", "Refill"])
 const VALID_DELIVERY_METHODS = new Set(["Local", "Mail"])
+const VALID_PROGRAM_TYPES = new Set(["PEPM_NBM", "DPC_NBM", "NBM"])
+const CONTRACT_BENEFIT_SOURCE_SYSTEM = "iStrata.is_contract_benefits"
+const CONTRACT_BENEFIT_REFILL_POLICY_SOURCE = "contract_benefit_refills_allowed"
+const CONTRACT_BENEFIT_REFILL_NULL_POLICY_SOURCE = "contract_benefit_null_default_allowed"
+const LIVE_NBM_ELIGIBILITY_PREFIX = "nbm-live-eligibility-"
+const LIVE_ELIGIBILITY_SOURCE_KEY_SQL = `
+  CONVERT(varchar(64), HASHBYTES('SHA2_256', CONCAT(
+    COALESCE(NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), groupid))), ''), ''),
+    '|',
+    COALESCE(NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(200), [Employee ID]))), ''), ''),
+    '|',
+    COALESCE(NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(200), [Customer Account Number]))), ''), ''),
+    '|',
+    COALESCE(NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(200), profileid))), ''), ''),
+    '|',
+    COALESCE(NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(200), insuranceid))), ''), ''),
+    '|',
+    COALESCE(CONVERT(nvarchar(10), TRY_CONVERT(date, DOB), 23), '')
+  )), 2)
+`
 
 interface ResolvedPatient {
   id: string
@@ -45,6 +65,26 @@ interface ResolvedPatient {
   supplementDiscount?: number | null
 }
 
+interface LiveContractBenefitRow {
+  contract_id: number | string
+  contract_record_id?: string | null
+  contract_start_date?: Date | string | null
+  contract_end_date?: Date | string | null
+  contract_status?: string | null
+  billing_cycle?: string | null
+  group_code?: string | null
+  group_name?: string | null
+  nbm_benefit_id: number | string
+  nbm_type?: string | null
+  annual_max_amount?: number | string | null
+  nbm_copay_amount?: number | string | null
+  refills_allowed?: boolean | number | string | null
+  pepm_benefit_id?: number | string | null
+  pepm_rate?: number | string | null
+  istrata_admin_fee?: number | string | null
+  nbm_fee?: number | string | null
+}
+
 function getNbmEligibilityId(value: unknown) {
   const text = String(value || "")
   if (!text.startsWith("nbm-eligibility-")) return null
@@ -53,7 +93,31 @@ function getNbmEligibilityId(value: unknown) {
   return Number.isInteger(id) && id > 0 ? id : null
 }
 
-function asDate(value?: string | null) {
+function getNbmLiveEligibilityKey(value: unknown) {
+  const text = String(value || "")
+  if (!text.startsWith(LIVE_NBM_ELIGIBILITY_PREFIX)) return null
+  const encoded = text.slice(LIVE_NBM_ELIGIBILITY_PREFIX.length)
+  if (!encoded) return null
+  try {
+    return decodeURIComponent(encoded)
+  } catch {
+    return null
+  }
+}
+
+function isNbmEligibilityPatientId(value: unknown) {
+  return getNbmEligibilityId(value) != null || getNbmLiveEligibilityKey(value) != null
+}
+
+function liveEligibilityId(sourceKey: unknown) {
+  return `${LIVE_NBM_ELIGIBILITY_PREFIX}${encodeURIComponent(String(sourceKey || "").trim())}`
+}
+
+function liveEligibilityObjectId(sourceKey: unknown) {
+  return `live:${String(sourceKey || "").trim()}`
+}
+
+function asDate(value?: string | Date | null) {
   if (!value) return null
   const date = new Date(value)
   return Number.isNaN(date.getTime()) ? null : date
@@ -129,6 +193,7 @@ interface NbmProgramRule {
   enforcementMode: string
   copayEnabled: boolean
   refillsAllowed: boolean
+  refillPolicySource: string
   pepmRate: number | null
   billingFrequency: string | null
   notificationThresholdPercent: number
@@ -207,6 +272,219 @@ async function ensureNbmPricingSchema(pool: sql.ConnectionPool) {
   `)
 }
 
+function normalizeProgramType(value: unknown, fallback = "PEPM_NBM") {
+  const programType = String(value || "").trim().toUpperCase()
+  return VALID_PROGRAM_TYPES.has(programType) ? programType : fallback
+}
+
+function cleanValue(value: unknown) {
+  if (value == null) return null
+  const text = String(value).trim()
+  return text || null
+}
+
+function contractBenefitSourceObjectId(row: LiveContractBenefitRow, programType = "PEPM_NBM") {
+  return `contract-benefit:${row.contract_id}:${row.nbm_benefit_id}:${normalizeProgramType(programType)}`
+}
+
+function contractBenefitProgramName(row: LiveContractBenefitRow) {
+  const recordId = cleanValue(row.contract_record_id)
+  const groupName = cleanValue(row.group_name)
+  const nbmType = cleanValue(row.nbm_type)
+  const suffix = nbmType ? `NBM ${nbmType}` : "NBM Benefit"
+  return [recordId, groupName, suffix].filter(Boolean).join(" - ") || "NBM Program"
+}
+
+function bitValue(value: unknown) {
+  if (value == null) return null
+  if (value === true || value === 1 || value === "1") return 1
+  if (value === false || value === 0 || value === "0") return 0
+  return value ? 1 : 0
+}
+
+function contractBenefitRefillsAllowed(row: LiveContractBenefitRow) {
+  const explicit = bitValue(row.refills_allowed)
+  return explicit == null ? 1 : explicit
+}
+
+function contractBenefitNotes(row: LiveContractBenefitRow) {
+  const explicitRefills = bitValue(row.refills_allowed)
+  return [
+    "Synced from live iStrata contract benefits.",
+    explicitRefills == null
+      ? "RefillsAllowed is null on the contract benefit; defaulted to allowed until reviewed."
+      : `RefillsAllowed=${explicitRefills}.`,
+    row.nbm_type ? `NBMType=${row.nbm_type}.` : null,
+    row.nbm_fee != null ? `NBMFee=${row.nbm_fee}.` : null,
+    row.istrata_admin_fee != null ? `IStrataAdminFee=${row.istrata_admin_fee}.` : null,
+    row.nbm_copay_amount != null ? `NBMCopayAmount=${row.nbm_copay_amount}.` : null,
+  ].filter(Boolean).join(" ")
+}
+
+async function getLiveContractBenefitRows(
+  pool: sql.ConnectionPool,
+  args: { groupId?: string | null; effectiveOn: Date; limit?: number }
+): Promise<LiveContractBenefitRow[]> {
+  const safeLimit = Math.min(Math.max(Number(args.limit) || 500, 1), 1000)
+  const result = await pool.request()
+    .input("groupId", sql.NVarChar(100), args.groupId || null)
+    .input("effectiveOn", sql.Date, args.effectiveOn)
+    .query(`
+      SELECT TOP (${safeLimit})
+        c.id AS contract_id,
+        CONVERT(nvarchar(100), c.RecordID) AS contract_record_id,
+        CAST(c.ContractStartDate AS date) AS contract_start_date,
+        CAST(c.ContractEndDate AS date) AS contract_end_date,
+        CONVERT(nvarchar(80), c.ContractStatus) AS contract_status,
+        CONVERT(nvarchar(40), c.BillingCycle) AS billing_cycle,
+        CONVERT(nvarchar(100), g.GroupId) AS group_code,
+        CONVERT(nvarchar(200), g.GroupName) AS group_name,
+        nbm.id AS nbm_benefit_id,
+        CONVERT(nvarchar(80), nbm.NBMType) AS nbm_type,
+        CAST(nbm.AnnualMaxAllowance AS decimal(12,2)) AS annual_max_amount,
+        CAST(nbm.CopayAmount AS decimal(12,2)) AS nbm_copay_amount,
+        CAST(nbm.RefillsAllowed AS bit) AS refills_allowed,
+        pepm.id AS pepm_benefit_id,
+        CAST(pepm.PEPMRate AS decimal(12,4)) AS pepm_rate,
+        CAST(pepm.IStrataAdminFee AS decimal(12,4)) AS istrata_admin_fee,
+        CAST(pepm.NBMFee AS decimal(12,4)) AS nbm_fee
+      FROM iStrata.dbo.is_group_contracts c
+      INNER JOIN iStrata.dbo.is_groups g ON g.id = c.group_id
+      INNER JOIN iStrata.dbo.is_contract_benefits nbm
+        ON nbm.contract_id = c.id
+       AND nbm.benefit_type = 'NBM'
+      LEFT JOIN iStrata.dbo.is_contract_benefits pepm
+        ON pepm.contract_id = c.id
+       AND pepm.benefit_type = 'PEPM'
+      WHERE (@groupId IS NULL OR g.GroupId = @groupId OR CONVERT(nvarchar(100), c.group_id) = @groupId)
+        AND (c.ContractStartDate IS NULL OR CAST(c.ContractStartDate AS date) <= @effectiveOn)
+        AND (c.ContractEndDate IS NULL OR CAST(c.ContractEndDate AS date) >= @effectiveOn)
+        AND (
+          c.ContractStatus IS NULL
+          OR LOWER(CONVERT(nvarchar(80), c.ContractStatus)) NOT IN ('inactive', 'expired', 'terminated', 'cancelled', 'canceled')
+        )
+      ORDER BY
+        CASE WHEN LOWER(CONVERT(nvarchar(80), c.ContractStatus)) = 'active' THEN 0 ELSE 1 END,
+        c.ContractStartDate DESC,
+        c.id DESC,
+        nbm.id DESC
+    `)
+
+  return result.recordset as LiveContractBenefitRow[]
+}
+
+async function upsertContractBenefitProgramRule(
+  pool: sql.ConnectionPool,
+  row: LiveContractBenefitRow,
+  requestedProgramType = "PEPM_NBM"
+) {
+  const programType = normalizeProgramType(requestedProgramType)
+  const sourceObjectId = contractBenefitSourceObjectId(row, programType)
+  const programName = contractBenefitProgramName(row)
+  const groupId = cleanValue(row.group_code)
+  const groupName = cleanValue(row.group_name)
+  const effectiveDate = asDate(row.contract_start_date)
+  const endDate = asDate(row.contract_end_date)
+  const annualMaxAmount = asNumber(row.annual_max_amount)
+  const pepmRate = asNumber(row.pepm_rate)
+  const billingFrequency = cleanValue(row.billing_cycle)
+  const refillsAllowed = contractBenefitRefillsAllowed(row)
+  const notes = contractBenefitNotes(row)
+
+  const update = await pool.request()
+    .input("sourceSystem", sql.NVarChar(80), CONTRACT_BENEFIT_SOURCE_SYSTEM)
+    .input("sourceObjectId", sql.NVarChar(160), sourceObjectId)
+    .input("programType", sql.NVarChar(40), programType)
+    .input("programName", sql.NVarChar(200), programName)
+    .input("groupId", sql.NVarChar(100), groupId)
+    .input("groupName", sql.NVarChar(200), groupName)
+    .input("effectiveDate", sql.Date, effectiveDate)
+    .input("endDate", sql.Date, endDate)
+    .input("active", sql.Bit, true)
+    .input("annualMaxAmount", sql.Decimal(12, 2), annualMaxAmount)
+    .input("pepmRate", sql.Decimal(12, 4), pepmRate)
+    .input("billingFrequency", sql.NVarChar(40), billingFrequency)
+    .input("refillsAllowed", sql.Bit, refillsAllowed)
+    .input("notes", sql.NVarChar(sql.MAX), notes)
+    .query(`
+      UPDATE dbo.nbm_program_rules
+        SET program_type = @programType,
+            program_name = @programName,
+            group_id = @groupId,
+            group_name = @groupName,
+            effective_date = @effectiveDate,
+            end_date = @endDate,
+            active = @active,
+            annual_max_amount = @annualMaxAmount,
+            pepm_rate = @pepmRate,
+            billing_frequency = @billingFrequency,
+            refills_allowed = @refillsAllowed,
+            notes = @notes,
+            updated_by = 'contract-benefit-sync',
+            updated_at = SYSUTCDATETIME()
+      OUTPUT inserted.*
+      WHERE source_system = @sourceSystem
+        AND source_object_id = @sourceObjectId
+    `)
+
+  if (update.recordset[0]) return update.recordset[0] as Record<string, unknown>
+
+  const insert = await pool.request()
+    .input("sourceSystem", sql.NVarChar(80), CONTRACT_BENEFIT_SOURCE_SYSTEM)
+    .input("sourceObjectId", sql.NVarChar(160), sourceObjectId)
+    .input("programType", sql.NVarChar(40), programType)
+    .input("programName", sql.NVarChar(200), programName)
+    .input("groupId", sql.NVarChar(100), groupId)
+    .input("groupName", sql.NVarChar(200), groupName)
+    .input("effectiveDate", sql.Date, effectiveDate)
+    .input("endDate", sql.Date, endDate)
+    .input("active", sql.Bit, true)
+    .input("annualMaxAmount", sql.Decimal(12, 2), annualMaxAmount)
+    .input("pepmRate", sql.Decimal(12, 4), pepmRate)
+    .input("billingFrequency", sql.NVarChar(40), billingFrequency)
+    .input("refillsAllowed", sql.Bit, refillsAllowed)
+    .input("notes", sql.NVarChar(sql.MAX), notes)
+    .query(`
+      INSERT INTO dbo.nbm_program_rules (
+        source_system, source_object_id, program_type, program_name,
+        group_id, group_name, effective_date, end_date, active,
+        annual_max_amount, pepm_rate, billing_frequency, refills_allowed,
+        notes, created_by, updated_by
+      )
+      OUTPUT inserted.*
+      VALUES (
+        @sourceSystem, @sourceObjectId, @programType, @programName,
+        @groupId, @groupName, @effectiveDate, @endDate, @active,
+        @annualMaxAmount, @pepmRate, @billingFrequency, @refillsAllowed,
+        @notes, 'contract-benefit-sync', 'contract-benefit-sync'
+      )
+    `)
+
+  return (insert.recordset[0] as Record<string, unknown> | undefined) || null
+}
+
+async function syncContractBenefitProgramRules(
+  pool: sql.ConnectionPool,
+  args: { groupId?: string | null; effectiveOn?: Date; programType?: string; limit?: number }
+) {
+  try {
+    const rows = await getLiveContractBenefitRows(pool, {
+      groupId: args.groupId || null,
+      effectiveOn: args.effectiveOn || new Date(),
+      limit: args.limit || 500,
+    })
+    const synced: Record<string, unknown>[] = []
+    for (const row of rows) {
+      const rule = await upsertContractBenefitProgramRule(pool, row, args.programType || "PEPM_NBM")
+      if (rule) synced.push(rule)
+    }
+    return synced
+  } catch (err) {
+    console.warn("Unable to sync live iStrata contract benefits for NBM rules", err instanceof Error ? err.message : err)
+    return []
+  }
+}
+
 function planYearWindow(referenceDate: Date, rule: NbmProgramRule) {
   const month = Math.min(Math.max(Number(rule.planYearStartMonth || 1), 1), 12) - 1
   const day = Math.min(Math.max(Number(rule.planYearStartDay || 1), 1), 31)
@@ -224,10 +502,12 @@ function mapProgramRule(row: Record<string, unknown> | undefined, patient: Resol
   const patientAnnualMax = asNumber(patient.supplementAllowance)
   const ruleAnnualMax = row?.annual_max_amount == null ? null : Number(row.annual_max_amount)
   const annualMaxAmount = ruleAnnualMax ?? patientAnnualMax
+  const sourceSystem = String(row?.source_system || "runtime")
+  const refillBit = bitValue(row?.refills_allowed)
 
   return {
     ruleId: String(row?.id || "") || null,
-    sourceSystem: String(row?.source_system || "runtime"),
+    sourceSystem,
     sourceObjectId: row?.source_object_id ? String(row.source_object_id) : null,
     programType: String(row?.program_type || "PEPM_NBM"),
     programName: String(row?.program_name || "Unconfigured PEPM NBM"),
@@ -239,7 +519,12 @@ function mapProgramRule(row: Record<string, unknown> | undefined, patient: Resol
     annualMaxMode: String(row?.annual_max_mode || "retail_dollars"),
     enforcementMode: String(row?.enforcement_mode || "prevent_exceeded"),
     copayEnabled: row?.copay_enabled == null ? true : Boolean(row.copay_enabled),
-    refillsAllowed: row?.refills_allowed == null ? true : Boolean(row.refills_allowed),
+    refillsAllowed: refillBit == null ? true : refillBit === 1,
+    refillPolicySource: sourceSystem === CONTRACT_BENEFIT_SOURCE_SYSTEM
+      ? (String(row?.notes || "").includes("RefillsAllowed is null")
+        ? CONTRACT_BENEFIT_REFILL_NULL_POLICY_SOURCE
+        : CONTRACT_BENEFIT_REFILL_POLICY_SOURCE)
+      : "program_rule",
     pepmRate: row?.pepm_rate == null ? null : Number(row.pepm_rate),
     billingFrequency: row?.billing_frequency ? String(row.billing_frequency) : null,
     notificationThresholdPercent: Number(row?.notification_threshold_percent || 100),
@@ -250,7 +535,14 @@ function mapProgramRule(row: Record<string, unknown> | undefined, patient: Resol
 }
 
 async function resolveProgramRule(pool: sql.ConnectionPool, patient: ResolvedPatient, locationId: string, body: Record<string, unknown>, submittedAt: Date) {
-  const programType = String(body.programType || body.program_type || "PEPM_NBM").trim() || "PEPM_NBM"
+  const programType = normalizeProgramType(body.programType || body.program_type || "PEPM_NBM")
+  await syncContractBenefitProgramRules(pool, {
+    groupId: patient.groupId || null,
+    effectiveOn: submittedAt,
+    programType,
+    limit: 25,
+  })
+
   const result = await pool.request()
     .input("programType", sql.NVarChar(40), programType)
     .input("effectiveOn", sql.Date, submittedAt)
@@ -271,7 +563,13 @@ async function resolveProgramRule(pool: sql.ConnectionPool, patient: ResolvedPat
       ORDER BY
         CASE WHEN r.location_id IS NOT NULL AND r.location_id = @locationId THEN 0 ELSE 1 END,
         CASE WHEN r.group_id IS NOT NULL AND r.group_id = @groupId THEN 0 ELSE 1 END,
-        CASE WHEN r.source_system = 'system' THEN 1 ELSE 0 END,
+        CASE
+          WHEN r.source_system = '${CONTRACT_BENEFIT_SOURCE_SYSTEM}' THEN 0
+          WHEN r.source_system = 'iStrata.is_group_contracts' THEN 1
+          WHEN r.source_system = 'nbm_full_eligibility' THEN 2
+          WHEN r.source_system = 'system' THEN 9
+          ELSE 4
+        END,
         r.effective_date DESC,
         r.created_at DESC
     `)
@@ -570,6 +868,79 @@ async function queueBenefitNotifications(
 }
 
 async function findNbmEligibilityPatient(pool: sql.ConnectionPool, patientId: unknown): Promise<ResolvedPatient | null> {
+  const liveKey = getNbmLiveEligibilityKey(patientId)
+  if (liveKey) {
+    const liveResult = await pool.request()
+      .input("sourceKey", sql.NVarChar(200), liveKey)
+      .query(`
+        SELECT TOP 1
+          keyset.sourceKey,
+          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), [Employee ID]))), '') AS employeeId,
+          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), insuranceid))), '') AS insuranceId,
+          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), profileid))), '') AS profileId,
+          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), [Customer Account Number]))), '') AS customerAccountNumber,
+          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), [First Name]))), '') AS firstName,
+          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), [Last Name]))), '') AS lastName,
+          TRY_CONVERT(date, DOB) AS dob,
+          COALESCE(
+            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), insuranceid))), ''),
+            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), [Employee ID]))), ''),
+            keyset.sourceKey
+          ) AS memberId,
+          COALESCE(
+            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(255), personalemailaddress))), ''),
+            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(255), [Work Email]))), '')
+          ) AS email,
+          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(50), Phone))), '') AS phone,
+          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(200), Address1))), '') AS address1,
+          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(200), Address2))), '') AS address2,
+          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), city))), '') AS city,
+          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(50), state))), '') AS state,
+          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(20), Zip))), '') AS zip,
+          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), groupid))), '') AS groupId,
+          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(200), [group]))), '') AS groupName,
+          TRY_CONVERT(decimal(12,2), [Supplement Allowance]) AS supplementAllowance,
+          TRY_CONVERT(decimal(12,2), [Supplement Discount]) AS supplementDiscount
+        FROM iStrata.dbo.vw_NBM_Full_Eligibility
+        CROSS APPLY (
+          SELECT ${LIVE_ELIGIBILITY_SOURCE_KEY_SQL} AS sourceKey
+        ) keyset
+        WHERE keyset.sourceKey = @sourceKey
+          AND (
+            [Account Status] IS NULL
+            OR LOWER(LTRIM(RTRIM(CONVERT(nvarchar(80), [Account Status])))) NOT IN ('inactive', 'terminated')
+          )
+          AND (
+            recordstatus IS NULL
+            OR LOWER(LTRIM(RTRIM(CONVERT(nvarchar(80), recordstatus)))) NOT IN ('inactive', 'terminated')
+          )
+      `)
+
+    const liveRow = liveResult.recordset[0]
+    if (!liveRow) return null
+
+    return {
+      id: liveEligibilityId(liveRow.sourceKey),
+      firstName: cleanValue(liveRow.firstName) || "",
+      lastName: cleanValue(liveRow.lastName) || "",
+      dob: liveRow.dob || null,
+      memberId: cleanValue(liveRow.memberId),
+      eligibilityObjectId: liveEligibilityObjectId(liveRow.sourceKey),
+      employeeId: cleanValue(liveRow.employeeId),
+      email: cleanValue(liveRow.email),
+      phone: cleanValue(liveRow.phone),
+      address1: cleanValue(liveRow.address1),
+      address2: cleanValue(liveRow.address2),
+      city: cleanValue(liveRow.city),
+      state: cleanValue(liveRow.state),
+      zip: cleanValue(liveRow.zip),
+      groupId: cleanValue(liveRow.groupId),
+      groupName: cleanValue(liveRow.groupName),
+      supplementAllowance: liveRow.supplementAllowance == null ? null : Number(liveRow.supplementAllowance),
+      supplementDiscount: liveRow.supplementDiscount == null ? null : Number(liveRow.supplementDiscount),
+    }
+  }
+
   const eligibilityId = getNbmEligibilityId(patientId)
   if (!eligibilityId) return null
 
@@ -703,7 +1074,7 @@ export async function POST(
     throw err
   }
 
-  const nbmEligibilityPatient = getNbmEligibilityId(body.patientId)
+  const nbmEligibilityPatient = isNbmEligibilityPatientId(body.patientId)
 
   const [location, patient, provider] = await (async () => {
     try {
