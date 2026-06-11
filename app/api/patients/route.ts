@@ -19,9 +19,7 @@ const LIVE_ELIGIBILITY_SOURCE_KEY_SQL = `
     '|',
     COALESCE(NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(200), e.profileid))), ''), ''),
     '|',
-    COALESCE(NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(200), e.insuranceid))), ''), ''),
-    '|',
-    COALESCE(CONVERT(nvarchar(10), TRY_CONVERT(date, e.DOB), 23), '')
+    COALESCE(NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(200), e.insuranceid))), ''), '')
   )), 2)
 `
 const NBM_CONTRACT_BENEFIT_ELIGIBILITY_GROUP_SQL = `
@@ -115,11 +113,28 @@ function patientDedupeKey(row: PatientSearchResult) {
   ].join("|").toLowerCase()
 }
 
+function liveEligibilitySearchMode(q: string) {
+  const raw = q.trim()
+  if (!raw) return { mode: "all" as const, value: "", first: "", last: "" }
+
+  const tokens = raw.split(/\s+/).filter(Boolean)
+  if (tokens.length >= 2 && !raw.includes("@")) {
+    return { mode: "nameParts" as const, value: raw, first: tokens[0], last: tokens.slice(1).join(" ") }
+  }
+  if (raw.includes("@")) return { mode: "email" as const, value: raw, first: "", last: "" }
+  if (/\d/.test(raw)) return { mode: "identifier" as const, value: raw, first: "", last: "" }
+  return { mode: "name" as const, value: raw, first: "", last: "" }
+}
+
 async function searchLiveEligibilityPatients(pool: sql.ConnectionPool, q: string) {
-  const search = `%${q}%`
-  const result = await pool.request()
-    .input("q", sql.NVarChar(255), search)
-    .input("hasQuery", sql.Bit, Boolean(q.trim()))
+  const search = liveEligibilitySearchMode(q)
+  const request = pool.request()
+    .input("searchMode", sql.NVarChar(20), search.mode)
+    .input("q", sql.NVarChar(255), search.value ? `%${search.value}%` : "")
+    .input("first", sql.NVarChar(120), search.first ? `%${search.first}%` : "")
+    .input("last", sql.NVarChar(120), search.last ? `%${search.last}%` : "")
+
+  const result = await request
     .query(`
       SELECT TOP 50
         keyset.sourceKey,
@@ -129,7 +144,7 @@ async function searchLiveEligibilityPatients(pool: sql.ConnectionPool, q: string
         NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.[Customer Account Number]))), '') AS customerAccountNumber,
         NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.[First Name]))), '') AS firstName,
         NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.[Last Name]))), '') AS lastName,
-        TRY_CONVERT(date, e.DOB) AS dob,
+        CAST(NULL AS date) AS dob,
         COALESCE(
           NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.insuranceid))), ''),
           NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.[Employee ID]))), ''),
@@ -147,25 +162,28 @@ async function searchLiveEligibilityPatients(pool: sql.ConnectionPool, q: string
         NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(20), e.Zip))), '') AS zip,
         NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.groupid))), '') AS groupId,
         NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(200), e.[group]))), '') AS groupName,
-        TRY_CONVERT(decimal(12,2), e.[Supplement Allowance]) AS supplementAllowance,
-        TRY_CONVERT(decimal(12,2), e.[Supplement Discount]) AS supplementDiscount
+        CAST(NULL AS decimal(12,2)) AS supplementAllowance,
+        CAST(NULL AS decimal(12,2)) AS supplementDiscount
       FROM iStrata.dbo.vw_Full_Eligibility e
       CROSS APPLY (
         SELECT ${LIVE_ELIGIBILITY_SOURCE_KEY_SQL} AS sourceKey
       ) keyset
       WHERE keyset.sourceKey IS NOT NULL
         AND (
-          @hasQuery = 0
-          OR CONVERT(nvarchar(100), e.[First Name]) LIKE @q
-          OR CONVERT(nvarchar(100), e.[Last Name]) LIKE @q
-          OR CONCAT(CONVERT(nvarchar(100), e.[First Name]), ' ', CONVERT(nvarchar(100), e.[Last Name])) LIKE @q
-          OR CONCAT(CONVERT(nvarchar(100), e.[Last Name]), ' ', CONVERT(nvarchar(100), e.[First Name])) LIKE @q
-          OR CONVERT(nvarchar(255), e.personalemailaddress) LIKE @q
-          OR CONVERT(nvarchar(255), e.[Work Email]) LIKE @q
-          OR CONVERT(nvarchar(100), e.[Employee ID]) LIKE @q
-          OR CONVERT(nvarchar(100), e.insuranceid) LIKE @q
-          OR CONVERT(nvarchar(100), e.profileid) LIKE @q
-          OR CONVERT(nvarchar(100), e.[Customer Account Number]) LIKE @q
+          @searchMode = 'all'
+          OR (@searchMode = 'name' AND (e.[First Name] LIKE @q OR e.[Last Name] LIKE @q))
+          OR (
+            @searchMode = 'nameParts'
+            AND (
+              (e.[First Name] LIKE @first AND e.[Last Name] LIKE @last)
+              OR (e.[First Name] LIKE @last AND e.[Last Name] LIKE @first)
+            )
+          )
+          OR (@searchMode = 'email' AND (e.personalemailaddress LIKE @q OR e.[Work Email] LIKE @q))
+          OR (
+            @searchMode = 'identifier'
+            AND e.[Employee ID] LIKE @q
+          )
         )
         AND (
           e.[Account Status] IS NULL

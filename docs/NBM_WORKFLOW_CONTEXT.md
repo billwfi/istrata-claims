@@ -25,7 +25,7 @@ Live eligibility rows are returned with ids in this format:
 nbm-live-eligibility-{encoded-source-key}
 ```
 
-As of 2026-06-11, the live `source-key` is a SHA-256 hash of a composite member identity from the full eligibility view (`category`, `groupid`, `Employee ID`, `Customer Account Number`, `profileid`, `insuranceid`, and `DOB`). Do not use `Customer Account Number` by itself for this key: it is not unique enough and can cause an Initial RX submit to resolve a different eligibility row than the one selected in search.
+As of 2026-06-11, the live `source-key` is a SHA-256 hash of a composite member identity from the full eligibility view (`category`, `groupid`, `Employee ID`, `Customer Account Number`, `profileid`, and `insuranceid`). Do not use `Customer Account Number` by itself for this key: it is not unique enough and can cause an Initial RX submit to resolve a different eligibility row than the one selected in search. DOB is deliberately not part of the live typeahead key because the consolidated eligibility view can expose upstream date conversion errors during broad searches.
 
 When an NBM eligibility patient is selected, the RX form autofills:
 

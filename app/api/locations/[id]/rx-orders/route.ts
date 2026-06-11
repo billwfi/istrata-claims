@@ -40,9 +40,7 @@ const LIVE_ELIGIBILITY_SOURCE_KEY_SQL = `
     '|',
     COALESCE(NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(200), e.profileid))), ''), ''),
     '|',
-    COALESCE(NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(200), e.insuranceid))), ''), ''),
-    '|',
-    COALESCE(CONVERT(nvarchar(10), TRY_CONVERT(date, e.DOB), 23), '')
+    COALESCE(NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(200), e.insuranceid))), ''), '')
   )), 2)
 `
 const NBM_CONTRACT_BENEFIT_ELIGIBILITY_GROUP_SQL = `
