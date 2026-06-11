@@ -7,6 +7,8 @@ import { devPatients, applyDevFallback } from "@/lib/dev-data"
 
 const LIVE_NBM_ELIGIBILITY_PREFIX = "nbm-live-eligibility-"
 const LIVE_NBM_ELIGIBILITY_SOURCE = "iStrata.vw_NBM_Full_Eligibility"
+const D11_NBM_ELIGIBILITY_PREFIX = "nbm-d11-eligibility-"
+const D11_NBM_ELIGIBILITY_SOURCE = "iStrata.SDCD11_Eligibility"
 const LIVE_ELIGIBILITY_SOURCE_KEY_SQL = `
   CONVERT(varchar(64), HASHBYTES('SHA2_256', CONCAT(
     COALESCE(NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), groupid))), ''), ''),
@@ -60,6 +62,14 @@ function liveEligibilityObjectId(sourceKey: unknown) {
   return `live:${String(sourceKey || "").trim()}`
 }
 
+function d11EligibilityId(sourceKey: unknown) {
+  return `${D11_NBM_ELIGIBILITY_PREFIX}${encodeURIComponent(String(sourceKey || "").trim())}`
+}
+
+function d11EligibilityObjectId(sourceKey: unknown) {
+  return `d11:${String(sourceKey || "").trim()}`
+}
+
 function mapLiveEligibilityPatient(row: Record<string, unknown>): PatientSearchResult {
   const sourceKey = cleanValue(row.sourceKey)
   return {
@@ -82,6 +92,32 @@ function mapLiveEligibilityPatient(row: Record<string, unknown>): PatientSearchR
     supplementDiscount: row.supplementDiscount == null ? null : Number(row.supplementDiscount),
     eligibilityObjectId: liveEligibilityObjectId(sourceKey),
     source: LIVE_NBM_ELIGIBILITY_SOURCE,
+    sourceKey,
+  }
+}
+
+function mapD11EligibilityPatient(row: Record<string, unknown>): PatientSearchResult {
+  const sourceKey = cleanValue(row.sourceKey) || cleanValue(row.eligibilityObjectId) || ""
+  return {
+    id: d11EligibilityId(sourceKey),
+    firstName: cleanValue(row.firstName),
+    lastName: cleanValue(row.lastName),
+    dob: null,
+    memberId: cleanValue(row.memberId) || sourceKey,
+    employeeId: cleanValue(row.employeeId) || sourceKey,
+    email: cleanValue(row.email),
+    phone: null,
+    address1: cleanValue(row.address1),
+    address2: cleanValue(row.address2),
+    city: cleanValue(row.city),
+    state: cleanValue(row.state),
+    zip: cleanValue(row.zip),
+    groupId: cleanValue(row.groupId),
+    groupName: cleanValue(row.groupName),
+    supplementAllowance: null,
+    supplementDiscount: null,
+    eligibilityObjectId: d11EligibilityObjectId(sourceKey),
+    source: D11_NBM_ELIGIBILITY_SOURCE,
     sourceKey,
   }
 }
@@ -165,6 +201,8 @@ async function searchLiveEligibilityPatients(pool: sql.ConnectionPool, q: string
           @hasQuery = 0
           OR CONVERT(nvarchar(100), [First Name]) LIKE @q
           OR CONVERT(nvarchar(100), [Last Name]) LIKE @q
+          OR CONCAT(CONVERT(nvarchar(100), [First Name]), ' ', CONVERT(nvarchar(100), [Last Name])) LIKE @q
+          OR CONCAT(CONVERT(nvarchar(100), [Last Name]), ' ', CONVERT(nvarchar(100), [First Name])) LIKE @q
           OR CONVERT(nvarchar(255), personalemailaddress) LIKE @q
           OR CONVERT(nvarchar(255), [Work Email]) LIKE @q
           OR CONVERT(nvarchar(100), [Employee ID]) LIKE @q
@@ -184,6 +222,58 @@ async function searchLiveEligibilityPatients(pool: sql.ConnectionPool, q: string
     `)
 
   return result.recordset.map(mapLiveEligibilityPatient)
+}
+
+async function searchD11EligibilityPatients(pool: sql.ConnectionPool, q: string) {
+  const search = `%${q}%`
+  const result = await pool.request()
+    .input("q", sql.NVarChar(255), search)
+    .input("hasQuery", sql.Bit, Boolean(q.trim()))
+    .query(`
+      SELECT TOP 50
+        CONVERT(nvarchar(100), e.ID) AS sourceKey,
+        CONVERT(nvarchar(100), e.ID) AS employeeId,
+        CONVERT(nvarchar(100), e.ID) AS memberId,
+        NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.[First Name]))), '') AS firstName,
+        NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.[Last]))), '') AS lastName,
+        NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(255), e.[Email ID]))), '') AS email,
+        NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(200), e.[Address 1]))), '') AS address1,
+        NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(200), e.[Address 2]))), '') AS address2,
+        NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.City))), '') AS city,
+        NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(50), e.State))), '') AS state,
+        NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(20), e.Postal))), '') AS zip,
+        NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.groupid))), '') AS groupId,
+        COALESCE(
+          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(200), g.GroupName))), ''),
+          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.groupid))), ''),
+          'D11 School District'
+        ) AS groupName
+      FROM iStrata.dbo.SDCD11_Eligibility e
+      LEFT JOIN iStrata.dbo.is_groups g
+        ON NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), g.GroupId))), '') =
+           NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.groupid))), '')
+      WHERE e.ID IS NOT NULL
+        AND (
+          @hasQuery = 0
+          OR CONVERT(nvarchar(100), e.[First Name]) LIKE @q
+          OR CONVERT(nvarchar(100), e.[Last]) LIKE @q
+          OR CONCAT(CONVERT(nvarchar(100), e.[First Name]), ' ', CONVERT(nvarchar(100), e.[Last])) LIKE @q
+          OR CONCAT(CONVERT(nvarchar(100), e.[Last]), ' ', CONVERT(nvarchar(100), e.[First Name])) LIKE @q
+          OR CONVERT(nvarchar(255), e.[Email ID]) LIKE @q
+          OR CONVERT(nvarchar(100), e.ID) LIKE @q
+          OR CONVERT(nvarchar(100), e.groupid) LIKE @q
+          OR CONVERT(nvarchar(100), e.[Sal Plan]) LIKE @q
+          OR CONVERT(nvarchar(100), e.[Medical Plan Descr]) LIKE @q
+        )
+        AND (
+          e.accountstatus IS NULL
+          OR LOWER(LTRIM(RTRIM(CONVERT(nvarchar(80), e.accountstatus)))) NOT IN ('inactive', 'terminated')
+        )
+        AND (e.termdate IS NULL OR e.termdate >= CAST(GETDATE() AS date))
+      ORDER BY e.[Last] ASC, e.[First Name] ASC, e.ID ASC
+    `)
+
+  return result.recordset.map(mapD11EligibilityPatient)
 }
 
 async function searchCopiedEligibilityPatients(pool: sql.ConnectionPool, q: string) {
@@ -215,6 +305,8 @@ async function searchCopiedEligibilityPatients(pool: sql.ConnectionPool, q: stri
           @hasQuery = 0
           OR first_name LIKE @q
           OR last_name LIKE @q
+          OR CONCAT(first_name, ' ', last_name) LIKE @q
+          OR CONCAT(last_name, ' ', first_name) LIKE @q
           OR personal_email LIKE @q
           OR work_email LIKE @q
           OR employee_id LIKE @q
@@ -236,7 +328,7 @@ async function searchNbmEligibilityPatients(q: string) {
   const combined: PatientSearchResult[] = []
   let firstError: unknown = null
 
-  for (const searcher of [searchLiveEligibilityPatients, searchCopiedEligibilityPatients]) {
+  for (const searcher of [searchLiveEligibilityPatients, searchD11EligibilityPatients, searchCopiedEligibilityPatients]) {
     try {
       combined.push(...await searcher(pool, q))
     } catch (err) {

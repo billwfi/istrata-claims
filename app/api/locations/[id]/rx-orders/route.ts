@@ -28,6 +28,7 @@ const CONTRACT_BENEFIT_SOURCE_SYSTEM = "iStrata.is_contract_benefits"
 const CONTRACT_BENEFIT_REFILL_POLICY_SOURCE = "contract_benefit_refills_allowed"
 const CONTRACT_BENEFIT_REFILL_NULL_POLICY_SOURCE = "contract_benefit_null_default_allowed"
 const LIVE_NBM_ELIGIBILITY_PREFIX = "nbm-live-eligibility-"
+const D11_NBM_ELIGIBILITY_PREFIX = "nbm-d11-eligibility-"
 const LIVE_ELIGIBILITY_SOURCE_KEY_SQL = `
   CONVERT(varchar(64), HASHBYTES('SHA2_256', CONCAT(
     COALESCE(NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), groupid))), ''), ''),
@@ -105,8 +106,23 @@ function getNbmLiveEligibilityKey(value: unknown) {
   }
 }
 
+function getD11EligibilityId(value: unknown) {
+  const text = String(value || "")
+  if (!text.startsWith(D11_NBM_ELIGIBILITY_PREFIX)) return null
+  const encoded = text.slice(D11_NBM_ELIGIBILITY_PREFIX.length)
+  if (!encoded) return null
+  try {
+    const id = Number(decodeURIComponent(encoded))
+    return Number.isInteger(id) && id > 0 ? id : null
+  } catch {
+    return null
+  }
+}
+
 function isNbmEligibilityPatientId(value: unknown) {
-  return getNbmEligibilityId(value) != null || getNbmLiveEligibilityKey(value) != null
+  return getNbmEligibilityId(value) != null
+    || getNbmLiveEligibilityKey(value) != null
+    || getD11EligibilityId(value) != null
 }
 
 function liveEligibilityId(sourceKey: unknown) {
@@ -115,6 +131,14 @@ function liveEligibilityId(sourceKey: unknown) {
 
 function liveEligibilityObjectId(sourceKey: unknown) {
   return `live:${String(sourceKey || "").trim()}`
+}
+
+function d11EligibilityId(sourceKey: unknown) {
+  return `${D11_NBM_ELIGIBILITY_PREFIX}${encodeURIComponent(String(sourceKey || "").trim())}`
+}
+
+function d11EligibilityObjectId(sourceKey: unknown) {
+  return `d11:${String(sourceKey || "").trim()}`
 }
 
 function asDate(value?: string | Date | null) {
@@ -938,6 +962,66 @@ async function findNbmEligibilityPatient(pool: sql.ConnectionPool, patientId: un
       groupName: cleanValue(liveRow.groupName),
       supplementAllowance: liveRow.supplementAllowance == null ? null : Number(liveRow.supplementAllowance),
       supplementDiscount: liveRow.supplementDiscount == null ? null : Number(liveRow.supplementDiscount),
+    }
+  }
+
+  const d11Id = getD11EligibilityId(patientId)
+  if (d11Id) {
+    const d11Result = await pool.request()
+      .input("d11Id", sql.Int, d11Id)
+      .query(`
+        SELECT TOP 1
+          CONVERT(nvarchar(100), e.ID) AS sourceKey,
+          CONVERT(nvarchar(100), e.ID) AS employeeId,
+          CONVERT(nvarchar(100), e.ID) AS memberId,
+          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.[First Name]))), '') AS firstName,
+          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.[Last]))), '') AS lastName,
+          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(255), e.[Email ID]))), '') AS email,
+          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(200), e.[Address 1]))), '') AS address1,
+          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(200), e.[Address 2]))), '') AS address2,
+          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.City))), '') AS city,
+          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(50), e.State))), '') AS state,
+          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(20), e.Postal))), '') AS zip,
+          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.groupid))), '') AS groupId,
+          COALESCE(
+            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(200), g.GroupName))), ''),
+            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.groupid))), ''),
+            'D11 School District'
+          ) AS groupName
+        FROM iStrata.dbo.SDCD11_Eligibility e
+        LEFT JOIN iStrata.dbo.is_groups g
+          ON NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), g.GroupId))), '') =
+             NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.groupid))), '')
+        WHERE e.ID = @d11Id
+          AND (
+            e.accountstatus IS NULL
+            OR LOWER(LTRIM(RTRIM(CONVERT(nvarchar(80), e.accountstatus)))) NOT IN ('inactive', 'terminated')
+          )
+          AND (e.termdate IS NULL OR e.termdate >= CAST(GETDATE() AS date))
+      `)
+
+    const d11Row = d11Result.recordset[0]
+    if (!d11Row) return null
+
+    return {
+      id: d11EligibilityId(d11Row.sourceKey),
+      firstName: cleanValue(d11Row.firstName) || "",
+      lastName: cleanValue(d11Row.lastName) || "",
+      dob: null,
+      memberId: cleanValue(d11Row.memberId),
+      eligibilityObjectId: d11EligibilityObjectId(d11Row.sourceKey),
+      employeeId: cleanValue(d11Row.employeeId),
+      email: cleanValue(d11Row.email),
+      phone: null,
+      address1: cleanValue(d11Row.address1),
+      address2: cleanValue(d11Row.address2),
+      city: cleanValue(d11Row.city),
+      state: cleanValue(d11Row.state),
+      zip: cleanValue(d11Row.zip),
+      groupId: cleanValue(d11Row.groupId),
+      groupName: cleanValue(d11Row.groupName),
+      supplementAllowance: null,
+      supplementDiscount: null,
     }
   }
 

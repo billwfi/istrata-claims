@@ -1,6 +1,6 @@
 # NBM Workflow Context
 
-Date: 2026-06-10
+Date: 2026-06-11
 
 This repo is the provider-facing entry point for the NBM RX workflow. The current branch adds the local/provider path for selecting eligibility patients, selecting NBM product-master products, and submitting RX orders into the `NBM` SQL database.
 
@@ -18,7 +18,8 @@ The test password is intentionally not documented here. Use the local project ha
 The RX form now calls `/api/patients?includeNbmEligibility=1` so it can search live NBM eligibility in addition to local patient data. The source priority is:
 
 1. `iStrata.dbo.vw_NBM_Full_Eligibility`
-2. `NBM.dbo.nbm_full_eligibility` copied/test fallback rows
+2. `iStrata.dbo.SDCD11_Eligibility` for D11 School District members not currently represented in the full NBM eligibility view
+3. `NBM.dbo.nbm_full_eligibility` copied/test fallback rows
 
 Live eligibility rows are returned with ids in this format:
 
@@ -34,6 +35,12 @@ Copied/test fallback eligibility rows keep the original id format:
 nbm-eligibility-{id}
 ```
 
+D11 eligibility rows use:
+
+```text
+nbm-d11-eligibility-{ID}
+```
+
 When an NBM eligibility patient is selected, the RX form autofills:
 
 - patient email
@@ -45,7 +52,7 @@ The patient search route only includes NBM eligibility rows when `includeNbmElig
 
 ## RX Submission
 
-`app/api/locations/[id]/rx-orders/route.ts` now detects both `nbm-live-eligibility-*` and `nbm-eligibility-*` patient ids. Live rows resolve from `iStrata.dbo.vw_NBM_Full_Eligibility`; copied/test rows resolve from `NBM.dbo.nbm_full_eligibility` before inserting the order into NBM tables.
+`app/api/locations/[id]/rx-orders/route.ts` now detects `nbm-live-eligibility-*`, `nbm-d11-eligibility-*`, and `nbm-eligibility-*` patient ids. Live rows resolve from `iStrata.dbo.vw_NBM_Full_Eligibility`; D11 rows resolve from `iStrata.dbo.SDCD11_Eligibility`; copied/test rows resolve from `NBM.dbo.nbm_full_eligibility` before inserting the order into NBM tables.
 
 The provider-facing claims form now follows the same NBM order shape as the management app:
 
@@ -87,7 +94,7 @@ As of 2026-06-09, provider RX submission prepares for the live management contra
 
 When `app/api/locations/[id]/rx-orders/route.ts` submits an NBM order, it:
 
-- resolves the selected NBM eligibility patient from live eligibility first or the copied/test eligibility fallback
+- resolves the selected NBM eligibility patient from live eligibility first, then D11 School District eligibility, then the copied/test eligibility fallback
 - syncs active group contract-benefit rows from:
   - `iStrata.dbo.is_group_contracts`
   - `iStrata.dbo.is_contract_benefits`
