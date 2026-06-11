@@ -28,21 +28,49 @@ const CONTRACT_BENEFIT_SOURCE_SYSTEM = "iStrata.is_contract_benefits"
 const CONTRACT_BENEFIT_REFILL_POLICY_SOURCE = "contract_benefit_refills_allowed"
 const CONTRACT_BENEFIT_REFILL_NULL_POLICY_SOURCE = "contract_benefit_null_default_allowed"
 const LIVE_NBM_ELIGIBILITY_PREFIX = "nbm-live-eligibility-"
-const D11_NBM_ELIGIBILITY_PREFIX = "nbm-d11-eligibility-"
 const LIVE_ELIGIBILITY_SOURCE_KEY_SQL = `
   CONVERT(varchar(64), HASHBYTES('SHA2_256', CONCAT(
-    COALESCE(NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), groupid))), ''), ''),
+    COALESCE(NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.category))), ''), ''),
     '|',
-    COALESCE(NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(200), [Employee ID]))), ''), ''),
+    COALESCE(NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.groupid))), ''), ''),
     '|',
-    COALESCE(NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(200), [Customer Account Number]))), ''), ''),
+    COALESCE(NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(200), e.[Employee ID]))), ''), ''),
     '|',
-    COALESCE(NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(200), profileid))), ''), ''),
+    COALESCE(NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(200), e.[Customer Account Number]))), ''), ''),
     '|',
-    COALESCE(NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(200), insuranceid))), ''), ''),
+    COALESCE(NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(200), e.profileid))), ''), ''),
     '|',
-    COALESCE(CONVERT(nvarchar(10), TRY_CONVERT(date, DOB), 23), '')
+    COALESCE(NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(200), e.insuranceid))), ''), ''),
+    '|',
+    COALESCE(CONVERT(nvarchar(10), TRY_CONVERT(date, e.DOB), 23), '')
   )), 2)
+`
+const ACTIVE_NBM_ELIGIBILITY_GROUP_SQL = `
+  AND (
+    EXISTS (
+      SELECT 1
+      FROM iStrata.dbo.is_group_contracts c
+      INNER JOIN iStrata.dbo.is_groups g ON g.id = c.group_id
+      INNER JOIN iStrata.dbo.is_contract_benefits nbm
+        ON nbm.contract_id = c.id
+       AND nbm.benefit_type = 'NBM'
+      WHERE NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), g.GroupId))), '') =
+            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.groupid))), '')
+        AND (c.ContractStartDate IS NULL OR CAST(c.ContractStartDate AS date) <= CAST(GETDATE() AS date))
+        AND (c.ContractEndDate IS NULL OR CAST(c.ContractEndDate AS date) >= CAST(GETDATE() AS date))
+        AND (
+          c.ContractStatus IS NULL
+          OR LOWER(CONVERT(nvarchar(80), c.ContractStatus)) NOT IN ('inactive', 'expired', 'terminated', 'cancelled', 'canceled')
+        )
+    )
+    OR EXISTS (
+      SELECT 1
+      FROM dbo.nbm_program_rules r
+      WHERE r.active = 1
+        AND NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), r.group_id))), '') =
+            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.groupid))), '')
+    )
+  )
 `
 
 interface ResolvedPatient {
@@ -106,23 +134,9 @@ function getNbmLiveEligibilityKey(value: unknown) {
   }
 }
 
-function getD11EligibilityId(value: unknown) {
-  const text = String(value || "")
-  if (!text.startsWith(D11_NBM_ELIGIBILITY_PREFIX)) return null
-  const encoded = text.slice(D11_NBM_ELIGIBILITY_PREFIX.length)
-  if (!encoded) return null
-  try {
-    const id = Number(decodeURIComponent(encoded))
-    return Number.isInteger(id) && id > 0 ? id : null
-  } catch {
-    return null
-  }
-}
-
 function isNbmEligibilityPatientId(value: unknown) {
   return getNbmEligibilityId(value) != null
     || getNbmLiveEligibilityKey(value) != null
-    || getD11EligibilityId(value) != null
 }
 
 function liveEligibilityId(sourceKey: unknown) {
@@ -131,14 +145,6 @@ function liveEligibilityId(sourceKey: unknown) {
 
 function liveEligibilityObjectId(sourceKey: unknown) {
   return `live:${String(sourceKey || "").trim()}`
-}
-
-function d11EligibilityId(sourceKey: unknown) {
-  return `${D11_NBM_ELIGIBILITY_PREFIX}${encodeURIComponent(String(sourceKey || "").trim())}`
-}
-
-function d11EligibilityObjectId(sourceKey: unknown) {
-  return `d11:${String(sourceKey || "").trim()}`
 }
 
 function asDate(value?: string | Date | null) {
@@ -899,45 +905,46 @@ async function findNbmEligibilityPatient(pool: sql.ConnectionPool, patientId: un
       .query(`
         SELECT TOP 1
           keyset.sourceKey,
-          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), [Employee ID]))), '') AS employeeId,
-          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), insuranceid))), '') AS insuranceId,
-          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), profileid))), '') AS profileId,
-          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), [Customer Account Number]))), '') AS customerAccountNumber,
-          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), [First Name]))), '') AS firstName,
-          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), [Last Name]))), '') AS lastName,
-          TRY_CONVERT(date, DOB) AS dob,
+          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.[Employee ID]))), '') AS employeeId,
+          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.insuranceid))), '') AS insuranceId,
+          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.profileid))), '') AS profileId,
+          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.[Customer Account Number]))), '') AS customerAccountNumber,
+          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.[First Name]))), '') AS firstName,
+          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.[Last Name]))), '') AS lastName,
+          TRY_CONVERT(date, e.DOB) AS dob,
           COALESCE(
-            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), insuranceid))), ''),
-            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), [Employee ID]))), ''),
+            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.insuranceid))), ''),
+            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.[Employee ID]))), ''),
             keyset.sourceKey
           ) AS memberId,
           COALESCE(
-            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(255), personalemailaddress))), ''),
-            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(255), [Work Email]))), '')
+            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(255), e.personalemailaddress))), ''),
+            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(255), e.[Work Email]))), '')
           ) AS email,
-          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(50), Phone))), '') AS phone,
-          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(200), Address1))), '') AS address1,
-          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(200), Address2))), '') AS address2,
-          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), city))), '') AS city,
-          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(50), state))), '') AS state,
-          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(20), Zip))), '') AS zip,
-          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), groupid))), '') AS groupId,
-          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(200), [group]))), '') AS groupName,
-          TRY_CONVERT(decimal(12,2), [Supplement Allowance]) AS supplementAllowance,
-          TRY_CONVERT(decimal(12,2), [Supplement Discount]) AS supplementDiscount
-        FROM iStrata.dbo.vw_NBM_Full_Eligibility
+          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(50), e.Phone))), '') AS phone,
+          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(200), e.Address1))), '') AS address1,
+          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(200), e.Address2))), '') AS address2,
+          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.city))), '') AS city,
+          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(50), e.state))), '') AS state,
+          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(20), e.Zip))), '') AS zip,
+          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.groupid))), '') AS groupId,
+          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(200), e.[group]))), '') AS groupName,
+          TRY_CONVERT(decimal(12,2), e.[Supplement Allowance]) AS supplementAllowance,
+          TRY_CONVERT(decimal(12,2), e.[Supplement Discount]) AS supplementDiscount
+        FROM iStrata.dbo.vw_Full_Eligibility e
         CROSS APPLY (
           SELECT ${LIVE_ELIGIBILITY_SOURCE_KEY_SQL} AS sourceKey
         ) keyset
         WHERE keyset.sourceKey = @sourceKey
           AND (
-            [Account Status] IS NULL
-            OR LOWER(LTRIM(RTRIM(CONVERT(nvarchar(80), [Account Status])))) NOT IN ('inactive', 'terminated')
+            e.[Account Status] IS NULL
+            OR LOWER(LTRIM(RTRIM(CONVERT(nvarchar(80), e.[Account Status])))) NOT IN ('inactive', 'terminated')
           )
           AND (
-            recordstatus IS NULL
-            OR LOWER(LTRIM(RTRIM(CONVERT(nvarchar(80), recordstatus)))) NOT IN ('inactive', 'terminated')
+            e.recordstatus IS NULL
+            OR LOWER(LTRIM(RTRIM(CONVERT(nvarchar(80), e.recordstatus)))) NOT IN ('inactive', 'terminated')
           )
+          ${ACTIVE_NBM_ELIGIBILITY_GROUP_SQL}
       `)
 
     const liveRow = liveResult.recordset[0]
@@ -962,66 +969,6 @@ async function findNbmEligibilityPatient(pool: sql.ConnectionPool, patientId: un
       groupName: cleanValue(liveRow.groupName),
       supplementAllowance: liveRow.supplementAllowance == null ? null : Number(liveRow.supplementAllowance),
       supplementDiscount: liveRow.supplementDiscount == null ? null : Number(liveRow.supplementDiscount),
-    }
-  }
-
-  const d11Id = getD11EligibilityId(patientId)
-  if (d11Id) {
-    const d11Result = await pool.request()
-      .input("d11Id", sql.Int, d11Id)
-      .query(`
-        SELECT TOP 1
-          CONVERT(nvarchar(100), e.ID) AS sourceKey,
-          CONVERT(nvarchar(100), e.ID) AS employeeId,
-          CONVERT(nvarchar(100), e.ID) AS memberId,
-          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.[First Name]))), '') AS firstName,
-          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.[Last]))), '') AS lastName,
-          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(255), e.[Email ID]))), '') AS email,
-          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(200), e.[Address 1]))), '') AS address1,
-          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(200), e.[Address 2]))), '') AS address2,
-          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.City))), '') AS city,
-          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(50), e.State))), '') AS state,
-          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(20), e.Postal))), '') AS zip,
-          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.groupid))), '') AS groupId,
-          COALESCE(
-            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(200), g.GroupName))), ''),
-            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.groupid))), ''),
-            'D11 School District'
-          ) AS groupName
-        FROM iStrata.dbo.SDCD11_Eligibility e
-        LEFT JOIN iStrata.dbo.is_groups g
-          ON NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), g.GroupId))), '') =
-             NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.groupid))), '')
-        WHERE e.ID = @d11Id
-          AND (
-            e.accountstatus IS NULL
-            OR LOWER(LTRIM(RTRIM(CONVERT(nvarchar(80), e.accountstatus)))) NOT IN ('inactive', 'terminated')
-          )
-          AND (e.termdate IS NULL OR e.termdate >= CAST(GETDATE() AS date))
-      `)
-
-    const d11Row = d11Result.recordset[0]
-    if (!d11Row) return null
-
-    return {
-      id: d11EligibilityId(d11Row.sourceKey),
-      firstName: cleanValue(d11Row.firstName) || "",
-      lastName: cleanValue(d11Row.lastName) || "",
-      dob: null,
-      memberId: cleanValue(d11Row.memberId),
-      eligibilityObjectId: d11EligibilityObjectId(d11Row.sourceKey),
-      employeeId: cleanValue(d11Row.employeeId),
-      email: cleanValue(d11Row.email),
-      phone: null,
-      address1: cleanValue(d11Row.address1),
-      address2: cleanValue(d11Row.address2),
-      city: cleanValue(d11Row.city),
-      state: cleanValue(d11Row.state),
-      zip: cleanValue(d11Row.zip),
-      groupId: cleanValue(d11Row.groupId),
-      groupName: cleanValue(d11Row.groupName),
-      supplementAllowance: null,
-      supplementDiscount: null,
     }
   }
 

@@ -17,9 +17,8 @@ The test password is intentionally not documented here. Use the local project ha
 
 The RX form now calls `/api/patients?includeNbmEligibility=1` so it can search live NBM eligibility in addition to local patient data. The source priority is:
 
-1. `iStrata.dbo.vw_NBM_Full_Eligibility`
-2. `iStrata.dbo.SDCD11_Eligibility` for D11 School District members not currently represented in the full NBM eligibility view
-3. `NBM.dbo.nbm_full_eligibility` copied/test fallback rows
+1. `iStrata.dbo.vw_Full_Eligibility`, filtered to groups with active NBM Contracts + Benefits or active `NBM.dbo.nbm_program_rules`
+2. `NBM.dbo.nbm_full_eligibility` copied/test fallback rows
 
 Live eligibility rows are returned with ids in this format:
 
@@ -27,18 +26,12 @@ Live eligibility rows are returned with ids in this format:
 nbm-live-eligibility-{encoded-source-key}
 ```
 
-As of 2026-06-11, the live `source-key` is a SHA-256 hash of a composite member identity from the live view (`groupid`, `Employee ID`, `Customer Account Number`, `profileid`, `insuranceid`, and `DOB`). Do not use `Customer Account Number` by itself for this key: it is not unique across all active rows and can cause an Initial RX submit to resolve a different eligibility row than the one selected in search.
+As of 2026-06-11, the live `source-key` is a SHA-256 hash of a composite member identity from the full eligibility view (`category`, `groupid`, `Employee ID`, `Customer Account Number`, `profileid`, `insuranceid`, and `DOB`). Do not use `Customer Account Number` by itself for this key: it is not unique enough and can cause an Initial RX submit to resolve a different eligibility row than the one selected in search.
 
 Copied/test fallback eligibility rows keep the original id format:
 
 ```text
 nbm-eligibility-{id}
-```
-
-D11 eligibility rows use:
-
-```text
-nbm-d11-eligibility-{ID}
 ```
 
 When an NBM eligibility patient is selected, the RX form autofills:
@@ -48,11 +41,11 @@ When an NBM eligibility patient is selected, the RX form autofills:
 - shipping address
 - city/state/ZIP
 
-The patient search route only includes NBM eligibility rows when `includeNbmEligibility=1`, so the legacy claims form can continue using the local patient list without automatically mixing in NBM eligibility data. The lookup does not select or return SSN values from the live eligibility view.
+The patient search route only includes NBM eligibility rows when `includeNbmEligibility=1`, so the legacy claims form can continue using the local patient list without automatically mixing in NBM eligibility data. The lookup does not select or return SSN values from the live eligibility view. District-specific imported eligibility tables, such as D11, are treated as upstream inputs owned by Bill/Claude's eligibility process; NBM reads the consolidated `vw_Full_Eligibility` surface.
 
 ## RX Submission
 
-`app/api/locations/[id]/rx-orders/route.ts` now detects `nbm-live-eligibility-*`, `nbm-d11-eligibility-*`, and `nbm-eligibility-*` patient ids. Live rows resolve from `iStrata.dbo.vw_NBM_Full_Eligibility`; D11 rows resolve from `iStrata.dbo.SDCD11_Eligibility`; copied/test rows resolve from `NBM.dbo.nbm_full_eligibility` before inserting the order into NBM tables.
+`app/api/locations/[id]/rx-orders/route.ts` now detects `nbm-live-eligibility-*` and `nbm-eligibility-*` patient ids. Live rows resolve from `iStrata.dbo.vw_Full_Eligibility` with the active NBM group filter; copied/test rows resolve from `NBM.dbo.nbm_full_eligibility` before inserting the order into NBM tables.
 
 The provider-facing claims form now follows the same NBM order shape as the management app:
 
@@ -94,7 +87,7 @@ As of 2026-06-09, provider RX submission prepares for the live management contra
 
 When `app/api/locations/[id]/rx-orders/route.ts` submits an NBM order, it:
 
-- resolves the selected NBM eligibility patient from live eligibility first, then D11 School District eligibility, then the copied/test eligibility fallback
+- resolves the selected NBM eligibility patient from full live eligibility first, then the copied/test eligibility fallback
 - syncs active group contract-benefit rows from:
   - `iStrata.dbo.is_group_contracts`
   - `iStrata.dbo.is_contract_benefits`
