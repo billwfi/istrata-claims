@@ -31,6 +31,7 @@ export async function GET(req: NextRequest) {
 
   if (q) {
     request.input("q", sql.NVarChar(120), `%${q}%`)
+    request.input("normalizedQ", sql.NVarChar(120), `%${q.replace(/[-_/]+/g, " ").replace(/\s+/g, " ")}%`)
   }
 
   const result = await request.query(`
@@ -46,7 +47,11 @@ export async function GET(req: NextRequest) {
       LTRIM(RTRIM([Product Form Type])) AS productFormType,
       CAST([NAB] AS nvarchar(50)) AS nab
     FROM dbo.NBMProductMaster
-    ${q ? "WHERE [Item Name] LIKE @q OR [Item SKU] LIKE @q" : ""}
+    ${q ? `
+      WHERE [Item Name] LIKE @q
+         OR [Item SKU] LIKE @q
+         OR REPLACE(REPLACE(REPLACE(CONVERT(nvarchar(400), [Item Name]), '-', ' '), '/', ' '), '_', ' ') LIKE @normalizedQ
+    ` : ""}
     ORDER BY [Item Name], [Item SKU]
   `)
 
