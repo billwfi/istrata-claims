@@ -101,24 +101,67 @@ interface LiveContractBenefitRow {
   nbm_fee?: number | string | null
 }
 
-function getNbmLiveEligibilityKey(value: unknown) {
+interface LiveEligibilityLookup {
+  sourceKey: string | null
+  category?: string | null
+  groupId?: string | null
+  employeeId?: string | null
+  customerAccountNumber?: string | null
+  profileId?: string | null
+  insuranceId?: string | null
+  legacyHashOnly: boolean
+}
+
+function parseNbmLiveEligibilityIdentifier(value: unknown): LiveEligibilityLookup | null {
   const text = String(value || "")
   if (!text.startsWith(LIVE_NBM_ELIGIBILITY_PREFIX)) return null
   const encoded = text.slice(LIVE_NBM_ELIGIBILITY_PREFIX.length)
   if (!encoded) return null
   try {
-    return decodeURIComponent(encoded)
+    const decoded = decodeURIComponent(encoded)
+    try {
+      const parsed = JSON.parse(decoded) as Record<string, unknown>
+      if (parsed && typeof parsed === "object" && parsed.sourceKey) {
+        return {
+          sourceKey: cleanValue(parsed.sourceKey),
+          category: cleanValue(parsed.category),
+          groupId: cleanValue(parsed.groupId),
+          employeeId: cleanValue(parsed.employeeId),
+          customerAccountNumber: cleanValue(parsed.customerAccountNumber),
+          profileId: cleanValue(parsed.profileId),
+          insuranceId: cleanValue(parsed.insuranceId),
+          legacyHashOnly: false,
+        }
+      }
+    } catch {
+      // Older live eligibility IDs only carried the hash. Keep reading them as a fallback.
+    }
+    return { sourceKey: decoded, legacyHashOnly: true }
   } catch {
     return null
   }
+}
+
+function getNbmLiveEligibilityKey(value: unknown) {
+  return parseNbmLiveEligibilityIdentifier(value)?.sourceKey || null
 }
 
 function isNbmEligibilityPatientId(value: unknown) {
   return getNbmLiveEligibilityKey(value) != null
 }
 
-function liveEligibilityId(sourceKey: unknown) {
-  return `${LIVE_NBM_ELIGIBILITY_PREFIX}${encodeURIComponent(String(sourceKey || "").trim())}`
+function liveEligibilityId(row: Record<string, unknown>) {
+  const payload = {
+    v: 1,
+    sourceKey: cleanValue(row.sourceKey) || "",
+    category: cleanValue(row.category) || "",
+    groupId: cleanValue(row.groupId) || "",
+    employeeId: cleanValue(row.employeeId) || "",
+    customerAccountNumber: cleanValue(row.customerAccountNumber) || "",
+    profileId: cleanValue(row.profileId) || "",
+    insuranceId: cleanValue(row.insuranceId) || "",
+  }
+  return `${LIVE_NBM_ELIGIBILITY_PREFIX}${encodeURIComponent(JSON.stringify(payload))}`
 }
 
 function liveEligibilityObjectId(sourceKey: unknown) {
@@ -885,81 +928,138 @@ async function queueBenefitNotifications(
 }
 
 async function findNbmEligibilityPatient(pool: sql.ConnectionPool, patientId: unknown): Promise<ResolvedPatient | null> {
-  const liveKey = getNbmLiveEligibilityKey(patientId)
-  if (liveKey) {
-    const liveResult = await pool.request()
-      .input("sourceKey", sql.NVarChar(200), liveKey)
-      .query(`
-        SELECT TOP 1
-          keyset.sourceKey,
-          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.[Employee ID]))), '') AS employeeId,
-          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.insuranceid))), '') AS insuranceId,
-          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.profileid))), '') AS profileId,
-          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.[Customer Account Number]))), '') AS customerAccountNumber,
-          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.[First Name]))), '') AS firstName,
-          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.[Last Name]))), '') AS lastName,
-          TRY_CONVERT(date, e.DOB) AS dob,
-          COALESCE(
-            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.insuranceid))), ''),
-            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.[Employee ID]))), ''),
-            keyset.sourceKey
-          ) AS memberId,
-          COALESCE(
-            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(255), e.personalemailaddress))), ''),
-            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(255), e.[Work Email]))), '')
-          ) AS email,
-          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(50), e.Phone))), '') AS phone,
-          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(200), e.Address1))), '') AS address1,
-          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(200), e.Address2))), '') AS address2,
-          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.city))), '') AS city,
-          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(50), e.state))), '') AS state,
-          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(20), e.Zip))), '') AS zip,
-          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.groupid))), '') AS groupId,
-          NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(200), e.[group]))), '') AS groupName,
-          TRY_CONVERT(decimal(12,2), e.[Supplement Allowance]) AS supplementAllowance,
-          TRY_CONVERT(decimal(12,2), e.[Supplement Discount]) AS supplementDiscount
-        FROM iStrata.dbo.vw_Full_Eligibility e
-        CROSS APPLY (
-          SELECT ${LIVE_ELIGIBILITY_SOURCE_KEY_SQL} AS sourceKey
-        ) keyset
-        WHERE keyset.sourceKey = @sourceKey
-          AND (
-            e.[Account Status] IS NULL
-            OR LOWER(LTRIM(RTRIM(CONVERT(nvarchar(80), e.[Account Status])))) NOT IN ('inactive', 'terminated')
-          )
-          AND (
-            e.recordstatus IS NULL
-            OR LOWER(LTRIM(RTRIM(CONVERT(nvarchar(80), e.recordstatus)))) NOT IN ('inactive', 'terminated')
-          )
-          ${NBM_CONTRACT_BENEFIT_ELIGIBILITY_GROUP_SQL}
-      `)
+  const lookup = parseNbmLiveEligibilityIdentifier(patientId)
+  if (!lookup?.sourceKey) return null
 
-    const liveRow = liveResult.recordset[0]
-    if (!liveRow) return null
+  const liveResult = lookup.legacyHashOnly
+    ? await pool.request()
+        .input("sourceKey", sql.NVarChar(200), lookup.sourceKey)
+        .query(`
+          SELECT TOP 1
+            keyset.sourceKey,
+            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.category))), '') AS category,
+            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.[Employee ID]))), '') AS employeeId,
+            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.insuranceid))), '') AS insuranceId,
+            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.profileid))), '') AS profileId,
+            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.[Customer Account Number]))), '') AS customerAccountNumber,
+            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.[First Name]))), '') AS firstName,
+            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.[Last Name]))), '') AS lastName,
+            CAST(NULL AS date) AS dob,
+            COALESCE(
+              NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.insuranceid))), ''),
+              NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.[Employee ID]))), ''),
+              keyset.sourceKey
+            ) AS memberId,
+            COALESCE(
+              NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(255), e.personalemailaddress))), ''),
+              NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(255), e.[Work Email]))), '')
+            ) AS email,
+            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(50), e.Phone))), '') AS phone,
+            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(200), e.Address1))), '') AS address1,
+            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(200), e.Address2))), '') AS address2,
+            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.city))), '') AS city,
+            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(50), e.state))), '') AS state,
+            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(20), e.Zip))), '') AS zip,
+            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.groupid))), '') AS groupId,
+            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(200), e.[group]))), '') AS groupName,
+            CAST(NULL AS decimal(12,2)) AS supplementAllowance,
+            CAST(NULL AS decimal(12,2)) AS supplementDiscount
+          FROM iStrata.dbo.vw_Full_Eligibility e
+          CROSS APPLY (
+            SELECT ${LIVE_ELIGIBILITY_SOURCE_KEY_SQL} AS sourceKey
+          ) keyset
+          WHERE keyset.sourceKey = @sourceKey
+            AND (
+              e.[Account Status] IS NULL
+              OR LOWER(LTRIM(RTRIM(CONVERT(nvarchar(80), e.[Account Status])))) NOT IN ('inactive', 'terminated')
+            )
+            AND (
+              e.recordstatus IS NULL
+              OR LOWER(LTRIM(RTRIM(CONVERT(nvarchar(80), e.recordstatus)))) NOT IN ('inactive', 'terminated')
+            )
+            ${NBM_CONTRACT_BENEFIT_ELIGIBILITY_GROUP_SQL}
+        `)
+    : await pool.request()
+        .input("category", sql.NVarChar(100), lookup.category || "")
+        .input("groupId", sql.NVarChar(100), lookup.groupId || "")
+        .input("employeeId", sql.NVarChar(100), lookup.employeeId || "")
+        .input("customerAccountNumber", sql.NVarChar(100), lookup.customerAccountNumber || "")
+        .input("profileId", sql.NVarChar(100), lookup.profileId || "")
+        .input("insuranceId", sql.NVarChar(100), lookup.insuranceId || "")
+        .query(`
+          SELECT TOP 1
+            keyset.sourceKey,
+            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.category))), '') AS category,
+            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.[Employee ID]))), '') AS employeeId,
+            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.insuranceid))), '') AS insuranceId,
+            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.profileid))), '') AS profileId,
+            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.[Customer Account Number]))), '') AS customerAccountNumber,
+            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.[First Name]))), '') AS firstName,
+            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.[Last Name]))), '') AS lastName,
+            CAST(NULL AS date) AS dob,
+            COALESCE(
+              NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.insuranceid))), ''),
+              NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.[Employee ID]))), ''),
+              keyset.sourceKey
+            ) AS memberId,
+            COALESCE(
+              NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(255), e.personalemailaddress))), ''),
+              NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(255), e.[Work Email]))), '')
+            ) AS email,
+            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(50), e.Phone))), '') AS phone,
+            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(200), e.Address1))), '') AS address1,
+            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(200), e.Address2))), '') AS address2,
+            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.city))), '') AS city,
+            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(50), e.state))), '') AS state,
+            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(20), e.Zip))), '') AS zip,
+            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.groupid))), '') AS groupId,
+            NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(200), e.[group]))), '') AS groupName,
+            CAST(NULL AS decimal(12,2)) AS supplementAllowance,
+            CAST(NULL AS decimal(12,2)) AS supplementDiscount
+          FROM iStrata.dbo.vw_Full_Eligibility e
+          CROSS APPLY (
+            SELECT ${LIVE_ELIGIBILITY_SOURCE_KEY_SQL} AS sourceKey
+          ) keyset
+          WHERE COALESCE(NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.category))), ''), '') = COALESCE(@category, '')
+            AND COALESCE(NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.groupid))), ''), '') = COALESCE(@groupId, '')
+            AND COALESCE(NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.[Employee ID]))), ''), '') = COALESCE(@employeeId, '')
+            AND COALESCE(NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.[Customer Account Number]))), ''), '') = COALESCE(@customerAccountNumber, '')
+            AND COALESCE(NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.profileid))), ''), '') = COALESCE(@profileId, '')
+            AND COALESCE(NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.insuranceid))), ''), '') = COALESCE(@insuranceId, '')
+            AND (
+              e.[Account Status] IS NULL
+              OR LOWER(LTRIM(RTRIM(CONVERT(nvarchar(80), e.[Account Status])))) NOT IN ('inactive', 'terminated')
+            )
+            AND (
+              e.recordstatus IS NULL
+              OR LOWER(LTRIM(RTRIM(CONVERT(nvarchar(80), e.recordstatus)))) NOT IN ('inactive', 'terminated')
+            )
+            ${NBM_CONTRACT_BENEFIT_ELIGIBILITY_GROUP_SQL}
+        `)
 
-    return {
-      id: liveEligibilityId(liveRow.sourceKey),
-      firstName: cleanValue(liveRow.firstName) || "",
-      lastName: cleanValue(liveRow.lastName) || "",
-      dob: liveRow.dob || null,
-      memberId: cleanValue(liveRow.memberId),
-      eligibilityObjectId: liveEligibilityObjectId(liveRow.sourceKey),
-      employeeId: cleanValue(liveRow.employeeId),
-      email: cleanValue(liveRow.email),
-      phone: cleanValue(liveRow.phone),
-      address1: cleanValue(liveRow.address1),
-      address2: cleanValue(liveRow.address2),
-      city: cleanValue(liveRow.city),
-      state: cleanValue(liveRow.state),
-      zip: cleanValue(liveRow.zip),
-      groupId: cleanValue(liveRow.groupId),
-      groupName: cleanValue(liveRow.groupName),
-      supplementAllowance: liveRow.supplementAllowance == null ? null : Number(liveRow.supplementAllowance),
-      supplementDiscount: liveRow.supplementDiscount == null ? null : Number(liveRow.supplementDiscount),
-    }
+  const liveRow = liveResult.recordset[0]
+  if (!liveRow || cleanValue(liveRow.sourceKey) !== cleanValue(lookup.sourceKey)) return null
+
+  return {
+    id: liveEligibilityId(liveRow),
+    firstName: cleanValue(liveRow.firstName) || "",
+    lastName: cleanValue(liveRow.lastName) || "",
+    dob: liveRow.dob || null,
+    memberId: cleanValue(liveRow.memberId),
+    eligibilityObjectId: liveEligibilityObjectId(liveRow.sourceKey),
+    employeeId: cleanValue(liveRow.employeeId),
+    email: cleanValue(liveRow.email),
+    phone: cleanValue(liveRow.phone),
+    address1: cleanValue(liveRow.address1),
+    address2: cleanValue(liveRow.address2),
+    city: cleanValue(liveRow.city),
+    state: cleanValue(liveRow.state),
+    zip: cleanValue(liveRow.zip),
+    groupId: cleanValue(liveRow.groupId),
+    groupName: cleanValue(liveRow.groupName),
+    supplementAllowance: liveRow.supplementAllowance == null ? null : Number(liveRow.supplementAllowance),
+    supplementDiscount: liveRow.supplementDiscount == null ? null : Number(liveRow.supplementDiscount),
   }
-
-  return null
 }
 
 async function findLocalPatient(patientId: string): Promise<ResolvedPatient | null> {

@@ -68,8 +68,18 @@ function cleanValue(value: unknown) {
   return text || null
 }
 
-function liveEligibilityId(sourceKey: unknown) {
-  return `${LIVE_NBM_ELIGIBILITY_PREFIX}${encodeURIComponent(String(sourceKey || "").trim())}`
+function liveEligibilityId(row: Record<string, unknown>) {
+  const payload = {
+    v: 1,
+    sourceKey: cleanValue(row.sourceKey) || "",
+    category: cleanValue(row.category) || "",
+    groupId: cleanValue(row.groupId) || "",
+    employeeId: cleanValue(row.employeeId) || "",
+    customerAccountNumber: cleanValue(row.customerAccountNumber) || "",
+    profileId: cleanValue(row.profileId) || "",
+    insuranceId: cleanValue(row.insuranceId) || "",
+  }
+  return `${LIVE_NBM_ELIGIBILITY_PREFIX}${encodeURIComponent(JSON.stringify(payload))}`
 }
 
 function liveEligibilityObjectId(sourceKey: unknown) {
@@ -79,7 +89,7 @@ function liveEligibilityObjectId(sourceKey: unknown) {
 function mapLiveEligibilityPatient(row: Record<string, unknown>): PatientSearchResult {
   const sourceKey = cleanValue(row.sourceKey)
   return {
-    id: liveEligibilityId(sourceKey),
+    id: liveEligibilityId(row),
     firstName: cleanValue(row.firstName),
     lastName: cleanValue(row.lastName),
     dob: row.dob as Date | string | null,
@@ -138,6 +148,7 @@ async function searchLiveEligibilityPatients(pool: sql.ConnectionPool, q: string
     .query(`
       SELECT TOP 50
         keyset.sourceKey,
+        NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.category))), '') AS category,
         NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.[Employee ID]))), '') AS employeeId,
         NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.insuranceid))), '') AS insuranceId,
         NULLIF(LTRIM(RTRIM(CONVERT(nvarchar(100), e.profileid))), '') AS profileId,
