@@ -226,7 +226,18 @@ function itemUtilizationAmount(item: RxItemInput) {
 
 function productCopayAmount(item: RxItemInput, program: NbmProgramRule) {
   if (!program.copayEnabled) return 0
+  if (program.copayAmount != null) return Number(program.copayAmount)
   return asNumber(item.copayAmount) ?? 0
+}
+
+function isAllowanceProgram(program: NbmProgramRule) {
+  const type = String(program.nbmType || "").trim().toLowerCase()
+  const source = String(program.copaySource || "").trim().toLowerCase()
+  return type === "allowance" || source === "allowance"
+}
+
+function retailReplacementLabel(program: NbmProgramRule) {
+  return isAllowanceProgram(program) ? "allowance coverage" : "copay"
 }
 
 interface NbmProgramRule {
@@ -242,7 +253,10 @@ interface NbmProgramRule {
   annualMaxAmount: number | null
   annualMaxMode: string
   enforcementMode: string
+  nbmType: string | null
   copayEnabled: boolean
+  copaySource: string | null
+  copayAmount: number | null
   refillsAllowed: boolean
   refillPolicySource: string
   pepmRate: number | null
@@ -287,11 +301,19 @@ function itemPatientPricing(item: RxItemInput, benefit: BenefitEvaluation, progr
     return {
       patientPayAmount: retailAmount,
       patientPayBasis: "retail",
-      pricingMessage: `Annual NBM allocation is exhausted or exceeded. Collect retail (${formatMoney(retailAmount)}) instead of copay.`,
+      pricingMessage: `Annual NBM allocation is exhausted or exceeded. Collect retail (${formatMoney(retailAmount)}) instead of ${retailReplacementLabel(program)}.`,
     }
   }
 
   if (!program.copayEnabled) {
+    if (isAllowanceProgram(program)) {
+      return {
+        patientPayAmount: 0,
+        patientPayBasis: "allowance",
+        pricingMessage: `Covered by NBM allowance. Retail value (${formatMoney(retailAmount)}) applies to the annual allowance.`,
+      }
+    }
+
     return {
       patientPayAmount: 0,
       patientPayBasis: "no_copay",
@@ -320,6 +342,11 @@ async function ensureNbmPricingSchema(pool: sql.ConnectionPool) {
       ALTER TABLE dbo.nbm_refill_tasks ADD payment_basis NVARCHAR(40) NULL;
     IF COL_LENGTH('dbo.nbm_refill_tasks', 'payment_message') IS NULL
       ALTER TABLE dbo.nbm_refill_tasks ADD payment_message NVARCHAR(500) NULL;
+
+    IF COL_LENGTH('dbo.nbm_program_rules', 'nbm_type') IS NULL
+      ALTER TABLE dbo.nbm_program_rules ADD nbm_type NVARCHAR(80) NULL;
+    IF COL_LENGTH('dbo.nbm_program_rules', 'copay_amount') IS NULL
+      ALTER TABLE dbo.nbm_program_rules ADD copay_amount DECIMAL(12,2) NULL;
   `)
 }
 
@@ -358,14 +385,31 @@ function contractBenefitRefillsAllowed(row: LiveContractBenefitRow) {
   return explicit == null ? 1 : explicit
 }
 
+function contractBenefitCopayEnabled(row: LiveContractBenefitRow) {
+  const nbmType = (cleanValue(row.nbm_type) || "").toLowerCase()
+  if (nbmType === "allowance") return false
+  return true
+}
+
+function contractBenefitCopaySource(row: LiveContractBenefitRow) {
+  const nbmType = (cleanValue(row.nbm_type) || "").toLowerCase()
+  if (nbmType === "allowance") return "allowance"
+  if (asNumber(row.nbm_copay_amount) != null) return "contract_benefit"
+  return "product_master"
+}
+
 function contractBenefitNotes(row: LiveContractBenefitRow) {
   const explicitRefills = bitValue(row.refills_allowed)
+  const copayEnabled = contractBenefitCopayEnabled(row)
+  const copaySource = contractBenefitCopaySource(row)
   return [
     "Synced from live iStrata contract benefits.",
     explicitRefills == null
       ? "RefillsAllowed is null on the contract benefit; defaulted to allowed until reviewed."
       : `RefillsAllowed=${explicitRefills}.`,
     row.nbm_type ? `NBMType=${row.nbm_type}.` : null,
+    `CopayEnabled=${copayEnabled ? 1 : 0}.`,
+    `CopaySource=${copaySource}.`,
     row.nbm_fee != null ? `NBMFee=${row.nbm_fee}.` : null,
     row.istrata_admin_fee != null ? `IStrataAdminFee=${row.istrata_admin_fee}.` : null,
     row.nbm_copay_amount != null ? `NBMCopayAmount=${row.nbm_copay_amount}.` : null,
@@ -445,6 +489,10 @@ async function upsertContractBenefitProgramRule(
   const pepmRate = asNumber(row.pepm_rate)
   const billingFrequency = cleanValue(row.billing_cycle)
   const refillsAllowed = contractBenefitRefillsAllowed(row)
+  const nbmType = cleanValue(row.nbm_type) || null
+  const copayEnabled = contractBenefitCopayEnabled(row)
+  const copaySource = contractBenefitCopaySource(row)
+  const copayAmount = asNumber(row.nbm_copay_amount)
   const notes = contractBenefitNotes(row)
 
   const update = await pool.request()
@@ -461,6 +509,10 @@ async function upsertContractBenefitProgramRule(
     .input("pepmRate", sql.Decimal(12, 4), pepmRate)
     .input("billingFrequency", sql.NVarChar(40), billingFrequency)
     .input("refillsAllowed", sql.Bit, refillsAllowed)
+    .input("nbmType", sql.NVarChar(80), nbmType)
+    .input("copayEnabled", sql.Bit, copayEnabled)
+    .input("copaySource", sql.NVarChar(40), copaySource)
+    .input("copayAmount", sql.Decimal(12, 2), copayAmount)
     .input("notes", sql.NVarChar(sql.MAX), notes)
     .query(`
       UPDATE dbo.nbm_program_rules
@@ -475,6 +527,10 @@ async function upsertContractBenefitProgramRule(
             pepm_rate = @pepmRate,
             billing_frequency = @billingFrequency,
             refills_allowed = @refillsAllowed,
+            nbm_type = @nbmType,
+            copay_enabled = @copayEnabled,
+            copay_source = @copaySource,
+            copay_amount = @copayAmount,
             notes = @notes,
             updated_by = 'contract-benefit-sync',
             updated_at = SYSUTCDATETIME()
@@ -499,12 +555,17 @@ async function upsertContractBenefitProgramRule(
     .input("pepmRate", sql.Decimal(12, 4), pepmRate)
     .input("billingFrequency", sql.NVarChar(40), billingFrequency)
     .input("refillsAllowed", sql.Bit, refillsAllowed)
+    .input("nbmType", sql.NVarChar(80), nbmType)
+    .input("copayEnabled", sql.Bit, copayEnabled)
+    .input("copaySource", sql.NVarChar(40), copaySource)
+    .input("copayAmount", sql.Decimal(12, 2), copayAmount)
     .input("notes", sql.NVarChar(sql.MAX), notes)
     .query(`
       INSERT INTO dbo.nbm_program_rules (
         source_system, source_object_id, program_type, program_name,
         group_id, group_name, effective_date, end_date, active,
         annual_max_amount, pepm_rate, billing_frequency, refills_allowed,
+        nbm_type, copay_enabled, copay_source, copay_amount,
         notes, created_by, updated_by
       )
       OUTPUT inserted.*
@@ -512,6 +573,7 @@ async function upsertContractBenefitProgramRule(
         @sourceSystem, @sourceObjectId, @programType, @programName,
         @groupId, @groupName, @effectiveDate, @endDate, @active,
         @annualMaxAmount, @pepmRate, @billingFrequency, @refillsAllowed,
+        @nbmType, @copayEnabled, @copaySource, @copayAmount,
         @notes, 'contract-benefit-sync', 'contract-benefit-sync'
       )
     `)
@@ -533,6 +595,28 @@ async function syncContractBenefitProgramRules(
     for (const row of rows) {
       const rule = await upsertContractBenefitProgramRule(pool, row, args.programType || "PEPM_NBM")
       if (rule) synced.push(rule)
+    }
+    if (args.groupId && synced.length) {
+      const sourceIds = synced.map(rule => rule.source_object_id).filter(Boolean).map(String)
+      if (sourceIds.length) {
+        const request = pool.request()
+          .input("programType", sql.NVarChar(40), normalizeProgramType(args.programType || "PEPM_NBM"))
+          .input("groupId", sql.NVarChar(100), args.groupId)
+        sourceIds.forEach((sourceId, index) => {
+          request.input(`sourceId${index}`, sql.NVarChar(160), sourceId)
+        })
+        const placeholders = sourceIds.map((_, index) => `@sourceId${index}`).join(",")
+        await request.query(`
+          UPDATE dbo.nbm_program_rules
+             SET active = 0,
+                 updated_by = 'contract-benefit-sync',
+                 updated_at = SYSUTCDATETIME()
+           WHERE source_system = '${CONTRACT_BENEFIT_SOURCE_SYSTEM}'
+             AND program_type = @programType
+             AND group_id = @groupId
+             AND source_object_id NOT IN (${placeholders})
+        `)
+      }
     }
     return synced
   } catch (err) {
@@ -574,7 +658,10 @@ function mapProgramRule(row: Record<string, unknown> | undefined, patient: Resol
     annualMaxAmount,
     annualMaxMode: String(row?.annual_max_mode || "retail_dollars"),
     enforcementMode: String(row?.enforcement_mode || "prevent_exceeded"),
+    nbmType: row?.nbm_type ? String(row.nbm_type) : null,
     copayEnabled: row?.copay_enabled == null ? true : Boolean(row.copay_enabled),
+    copaySource: row?.copay_source ? String(row.copay_source) : null,
+    copayAmount: row?.copay_amount == null ? null : Number(row.copay_amount),
     refillsAllowed: refillBit == null ? true : refillBit === 1,
     refillPolicySource: sourceSystem === CONTRACT_BENEFIT_SOURCE_SYSTEM
       ? (String(row?.notes || "").includes("RefillsAllowed is null")
@@ -682,10 +769,10 @@ async function evaluateBenefit(pool: sql.ConnectionPool, patient: ResolvedPatien
     message = "Retail cost is required to enforce the configured annual NBM maximum."
   } else if (before >= annualMax || after > annualMax) {
     status = "retail_required"
-    message = `Annual NBM allocation is exhausted or exceeded (${formatMoney(annualMax)} max). Current used: ${formatMoney(before)}; order retail: ${formatMoney(orderUtilization)}. Patient should pay retail instead of copay.`
+    message = `Annual NBM allocation is exhausted or exceeded (${formatMoney(annualMax)} max). Current used: ${formatMoney(before)}; order retail: ${formatMoney(orderUtilization)}. Patient should pay retail instead of ${retailReplacementLabel(program)}.`
   } else if (threshold != null && after >= threshold) {
     status = "max_reached"
-    message = `Patient reaches the configured NBM annual threshold (${formatMoney(annualMax)}) with this fill. Future fills should be retail instead of copay.`
+    message = `Patient reaches the configured NBM annual threshold (${formatMoney(annualMax)}) with this fill. Future fills should be retail instead of ${retailReplacementLabel(program)}.`
   }
 
   return {
